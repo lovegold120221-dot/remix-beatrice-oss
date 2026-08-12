@@ -1916,6 +1916,13 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
     });
   }
 
+  // Fatal bind errors (e.g. EADDRINUSE from a second instance) must kill the
+  // process so supervisors (systemd) can converge to a single healthy instance.
+  server.on('error', (err: any) => {
+    console.error('[server] Fatal listen error:', err?.message || err);
+    process.exit(1);
+  });
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Beatrice OSS server listening on 0.0.0.0:${PORT}`);
     console.log(`Public URL: ${APP_URL}`);
@@ -1929,6 +1936,12 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
 
 process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err?.stack || err);
+  // Fatal bind conflicts (EADDRINUSE from a competing instance) must kill the
+  // process so the supervisor can restart it cleanly.
+  const msg = err?.message || String(err);
+  if (msg.includes('EADDRINUSE') || msg.includes('address already in use')) {
+    process.exit(1);
+  }
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);

@@ -2,6 +2,7 @@
 
 ## Commands
 - `npm install`
+- `sudo bash install-server.sh` — full server provisioning (apt build tools/ffmpeg/libxtst-dev/libpng-dev, Playwright Chromium, OpenCode CLI, `.env.local` from `.env.example`, data dirs, npm install, build). `--skip-deps` for code-only re-install; `INSTALL_SYSTEMD=1` adds a systemd unit. Do NOT run two app instances per host (service ports 5556-5560 clash).
 - `npm run dev` — runs `tsx server.ts` (Express + Vite middleware + WS)
 - `npm run build` — `vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs`
 - `npm start` — `node dist/server.cjs`

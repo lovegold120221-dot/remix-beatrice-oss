@@ -50,6 +50,12 @@ The coding agent carries 89 skills on the server (`~/.agents/skills/`):
 
 Other services: internal WS tool services on ports 5556–5560 (sandbox, CLI, browser, computer, coding agent), REST `/api/tools/*`, `/api/workspace/*`, `/api/whatsapp/*`, WS `/live`.
 
+## Documentation
+
+- **[install-server.sh](install-server.sh)** — full server provisioning: system toolchain, Playwright Chromium, OpenCode CLI, `.env.local`, data dirs, npm install + build; `--skip-deps` for code-only re-install, `INSTALL_SYSTEMD=1` for a systemd unit
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** — full production deployment guide: install script walkthrough (step-by-step table), sandbox & service integration notes, env vars, build/run, Caddy & Nginx + Let's Encrypt, WebSocket header forwarding, verification checklist, operational notes
+- **[APP_LOGIC.md](APP_LOGIC.md)** — runtime app logic with Mermaid diagrams: live voice flow, tool dispatch, WhatsApp SOP, coding agent, resilience, message contract, REST endpoints
+
 ## Run Locally
 
 **Prerequisites:**  Node.js
