@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Beatrice AI - Computer Use</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        :root {
+            --bg-base: #000000;
+            --bg-elevated: rgba(20, 20, 22, 0.75);
+            --bg-panel: #121214;
+            --text-primary: #ffffff;
+            --text-secondary: #8e8e93;
+            --text-muted: #52525b;
+            --accent-glow: rgba(79, 172, 254, 0.15);
+            --accent-cyan: #00f2fe;
+            --accent-blue: #4facfe;
+            --term-info: #4facfe;
+            --term-action: #a7f3d0;
+            --term-warn: #fde047;
+            --spring: cubic-bezier(0.25, 1, 0.5, 1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+        body { background-color: #050505; display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; overflow: hidden; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+        .device-frame { width: 100%; max-width: 430px; height: 100%; max-height: 932px; background-color: var(--bg-base); display: flex; flex-direction: column; overflow: hidden; }
+        .ambient-bg { position: absolute; top: 10%; left: 20%; right: 20%; height: 300px; background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%); z-index: 0; pointer-events: none; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: max(24px, env(safe-area-inset-top)) 24px 16px; position: relative; z-index: 10; background: var(--bg-base); border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .header-text { display: flex; align-items: center; gap: 12px; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background-color: var(--accent-cyan); box-shadow: 0 0 10px var(--accent-cyan); animation: pulse-dot 2s infinite alternate; }
+        .header-titles { display: flex; flex-direction: column; }
+        .header-titles h1 { font-size: 1rem; font-weight: 600; }
+        .header-titles p { font-size: 0.65rem; font-weight: 500; color: var(--accent-cyan); letter-spacing: 0.1em; text-transform: uppercase; }
+        .stop-btn { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); padding: 8px 12px; border-radius: 16px; font-size: 0.75rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s var(--spring); }
+        .stop-btn:active { transform: scale(0.92); background: rgba(239, 68, 68, 0.3); }
+        main { flex-grow: 1; display: flex; flex-direction: column; padding: 16px; gap: 16px; position: relative; z-index: 5; overflow: hidden; }
+        .webview-container { flex: 1; background: var(--bg-panel); border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); position: relative; }
+        .browser-bar { height: 36px; background: rgba(255,255,255,0.03); border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; padding: 0 12px; gap: 12px; }
+        .window-controls { display: flex; gap: 6px; }
+        .window-controls span { width: 10px; height: 10px; border-radius: 50%; }
+        .window-controls span:nth-child(1) { background: #ff5f56; }
+        .window-controls span:nth-child(2) { background: #ffbd2e; }
+        .window-controls span:nth-child(3) { background: #27c93f; }
+        .url-bar { flex-grow: 1; background: rgba(0,0,0,0.4); border-radius: 8px; height: 24px; display: flex; align-items: center; padding: 0 10px; font-size: 0.65rem; color: var(--text-secondary); gap: 6px; border: 1px solid rgba(255,255,255,0.02); }
+        .browser-content { flex-grow: 1; position: relative; background: #ffffff; overflow: hidden; padding: 16px; }
+        .wireframe-header { width: 100%; height: 20px; background: #f1f5f9; border-radius: 4px; margin-bottom: 16px; }
+        .wireframe-block { width: 70%; height: 12px; background: #e2e8f0; border-radius: 4px; margin-bottom: 8px; }
+        .wireframe-block.short { width: 40%; }
+        .wireframe-image { width: 100%; height: 80px; background: #cbd5e1; border-radius: 8px; margin-top: 16px; }
+        .ai-cursor { position: absolute; top: 20px; left: 20px; width: 18px; height: 18px; z-index: 20; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4)); transition: top 1s cubic-bezier(0.25, 1, 0.5, 1), left 1s cubic-bezier(0.25, 1, 0.5, 1); }
+        .ai-cursor svg { fill: var(--bg-base); stroke: var(--accent-cyan); stroke-width: 1.5px; }
+        .ai-cursor::after { content: 'Beatrice AI'; position: absolute; top: 18px; left: 10px; background: var(--accent-cyan); color: #000; font-size: 0.5rem; font-weight: 700; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+        .terminal-container { flex: 0.8; background: var(--bg-base); border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; overflow: hidden; box-shadow: inset 0 0 20px rgba(0,0,0,1); }
+        .terminal-header { height: 32px; background: rgba(255,255,255,0.03); border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; padding: 0 12px; font-size: 0.65rem; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; gap: 8px; }
+        .terminal-logs { flex-grow: 1; padding: 12px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; line-height: 1.6; color: var(--text-secondary); scroll-behavior: smooth; }
+        .terminal-logs::-webkit-scrollbar { width: 4px; }
+        .terminal-logs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        .log-entry { margin-bottom: 4px; word-wrap: break-word; animation: fade-in 0.3s ease-out; }
+        .log-time { color: var(--text-muted); margin-right: 8px; }
+        .log-tag.info { color: var(--term-info); }
+        .log-tag.action { color: var(--term-action); }
+        .log-tag.warn { color: var(--term-warn); }
+        .log-text { color: var(--text-primary); }
+        .cursor-blink { display: inline-block; width: 6px; height: 12px; background-color: var(--accent-cyan); vertical-align: middle; animation: blink 1s step-end infinite; margin-left: 4px; }
+        footer { padding: 16px 24px max(32px, env(safe-area-inset-bottom)); background: var(--bg-elevated); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; gap: 12px; z-index: 10; }
+        .input-bar { flex-grow: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); height: 44px; border-radius: 22px; display: flex; align-items: center; padding: 0 16px; color: var(--text-primary); font-size: 0.85rem; }
+        .mic-btn-small { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%); border: none; color: white; display: flex; justify-content: center; align-items: center; box-shadow: 0 4px 12px rgba(79, 172, 254, 0.4); cursor: pointer; transition: transform 0.2s var(--spring); }
+        .mic-btn-small:active { transform: scale(0.9); }
+        .home-indicator { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); width: 35%; height: 5px; background-color: rgba(255,255,255,0.3); border-radius: 10px; z-index: 20; }
+        @keyframes pulse-dot { 0% { opacity: 0.5; box-shadow: 0 0 5px var(--accent-cyan); } 100% { opacity: 1; box-shadow: 0 0 15px var(--accent-cyan); } }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+    </style>
+</head>
+<body>
+
+    <div class="device-frame">
+        <div class="ambient-bg"></div>
+        <header>
+            <div class="header-text">
+                <div class="status-dot"></div>
+                <div class="header-titles">
+                    <h1>Beatrice</h1>
+                    <p>Computer Control</p>
+                </div>
+            </div>
+            <button class="stop-btn" aria-label="Stop Action">
+                <i data-lucide="square" width="14" height="14" fill="currentColor"></i>
+                Stop
+            </button>
+        </header>
+        <main>
+            <div class="webview-container">
+                <div class="browser-bar">
+                    <div class="window-controls">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <div class="url-bar">
+                        <i data-lucide="lock" width="12" height="12"></i>
+                        <span id="browser-url">https://oss.eburon.ai</span>
+                    </div>
+                </div>
+                <div class="browser-content" id="browser-viewport">
+                    <div class="wireframe-header"></div>
+                    <div class="wireframe-block"></div>
+                    <div class="wireframe-block short"></div>
+                    <div class="wireframe-image"></div>
+                    <div class="wireframe-block" style="margin-top: 16px;"></div>
+                    <div class="wireframe-block short"></div>
+                    <div class="ai-cursor" id="ai-cursor">
+                        <svg viewBox="0 0 24 24" width="100%" height="100%">
+                            <path d="M4 2L20 12L12 14L10 22L4 2Z" />
+                        </svg>
+                    </div>
+                </div>
+            </div>
+            <div class="terminal-container">
+                <div class="terminal-header">
+                    <i data-lucide="terminal" width="14" height="14"></i>
+                    Agent Execution Logs
+                </div>
+                <div class="terminal-logs" id="terminal-logs">
+                    <div id="typing-cursor" class="cursor-blink"></div>
+                </div>
+            </div>
+        </main>
+        <footer>
+            <div class="input-bar">Find highly rated react repositories...</div>
+            <button class="mic-btn-small" aria-label="Voice Input">
+                <i data-lucide="mic" width="20" height="20" stroke-width="2.5"></i>
+            </button>
+        </footer>
+        <div class="home-indicator"></div>
+    </div>
+
+    <script>
+        lucide.createIcons();
+        const terminalLogs = document.getElementById('terminal-logs');
+        const typingCursor = document.getElementById('typing-cursor');
+        const cursor = document.getElementById('ai-cursor');
+        
+        const simulationSteps = [
+            { type: 'info', msg: 'Initializing computer use environment...', delay: 1000, x: 20, y: 20 },
+            { type: 'action', msg: 'Opening Google Chrome browser', delay: 1500, x: 50, y: 150 },
+            { type: 'action', msg: 'Navigating to https://github.com/explore', delay: 1200, x: 150, y: 20 },
+            { type: 'info', msg: 'Waiting for DOM content to load', delay: 2000, x: 150, y: 20 },
+            { type: 'action', msg: 'Locating search input field', delay: 1000, x: 200, y: 80 },
+            { type: 'action', msg: 'Typing "react ui libraries"', delay: 1500, x: 200, y: 80 },
+            { type: 'action', msg: 'Clicking search button', delay: 1000, x: 280, y: 80 },
+            { type: 'warn', msg: 'High latency detected. Retrying click...', delay: 1500, x: 280, y: 80 },
+            { type: 'info', msg: 'Parsing search results (14 items found)', delay: 2000, x: 150, y: 180 },
+            { type: 'action', msg: 'Scrolling down page', delay: 1500, x: 150, y: 250 },
+            { type: 'action', msg: 'Extracting data from top repository', delay: 2000, x: 100, y: 220 }
+        ];
+
+        let stepIndex = 0;
+
+        function getTimestamp() {
+            const now = new Date();
+            return now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+        }
+
+        function appendLog(step) {
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            const tagLabel = step.type === 'info' ? '[INFO]' : step.type === 'action' ? '[EXEC]' : '[WARN]';
+            logEntry.innerHTML = `
+                <span class="log-time">${getTimestamp()}</span>
+                <span class="log-tag ${step.type}">${tagLabel}</span>
+                <span class="log-text">${step.msg}</span>
+            `;
+            terminalLogs.insertBefore(logEntry, typingCursor);
+            terminalLogs.scrollTop = terminalLogs.scrollHeight;
+            cursor.style.left = step.x + 'px';
+            cursor.style.top = step.y + 'px';
+        }
+
+        function runSimulation() {
+            if (stepIndex < simulationSteps.length) {
+                const step = simulationSteps[stepIndex];
+                appendLog(step);
+                stepIndex++;
+                setTimeout(runSimulation, step.delay);
+            } else {
+                setTimeout(() => {
+                    terminalLogs.innerHTML = '';
+                    terminalLogs.appendChild(typingCursor);
+                    stepIndex = 0;
+                    runSimulation();
+                }, 4000);
+            }
+        }
+
+        setTimeout(runSimulation, 500);
+</script>
+</body>
+</html>

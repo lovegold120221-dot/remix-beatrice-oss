@@ -30,7 +30,6 @@ import { ContextWindowHUD } from './components/ContextWindowHUD';
 import { MemoryInspectorModal } from './components/MemoryInspectorModal';
 import { VadControlWidget } from './components/VadControlWidget';
 import { WhatsAppApprovalModal, WhatsAppApprovalState, WhatsAppPanelState } from './components/WhatsAppPanel';
-import { TasksPage } from './components/TasksPage';
 import { useAuth } from './context/AuthContext';
 import { AuthPage } from './components/AuthPage';
 import { db, auth } from './lib/firebase';
@@ -67,7 +66,6 @@ import {
   X,
   User as UserIcon,
   Brain,
-  Loader2,
   Volume2,
 } from 'lucide-react';
 
@@ -149,7 +147,7 @@ export default function App() {
 
   const [isMemoryInspectorOpen, setIsMemoryInspectorOpen] = useState<boolean>(false);
   const [isCompressingMemory, setIsCompressingMemory] = useState<boolean>(false);
-  const [isTasksPageOpen, setIsTasksPageOpen] = useState<boolean>(false);
+
 
   // Voice Activity Detection (VAD) States
   const [vadConfig, setVadConfigState] = useState<VadConfig>({
@@ -1573,14 +1571,6 @@ export default function App() {
               <Video className="w-6 h-6" strokeWidth={2} />
               <span className="text-[0.6rem] font-semibold tracking-[0.2px]">Video</span>
             </button>
-            <button
-              onClick={() => setIsTasksPageOpen(true)}
-              className={`w-14 flex flex-col items-center gap-2 text-[#8e8e93] hover:text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 cursor-pointer bg-transparent border-none`}
-              aria-label="View active tasks"
-              title="View active tasks">
-              <Loader2 className="w-5 h-5 text-[#00f2fe]" />
-              <span className="text-[0.6rem] font-semibold tracking-[0.2px]">Tasks</span>
-            </button>
           </div>
         </footer>
 
@@ -1719,7 +1709,6 @@ export default function App() {
       {!showIntro && !gatePassed && <AuthPage onSkip={() => setSkipAuth(true)} />}
 
       {/* Tasks/Processes Page - shows ongoing automation processes */}
-      {isTasksPageOpen && <TasksPage onClose={() => setIsTasksPageOpen(false)} />}
 
       {/* Autoplay Intro Video Overlay */}
       {showIntro && (
