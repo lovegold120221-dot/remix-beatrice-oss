@@ -1,0 +1,56 @@
+{
+  "rules": {
+    "transcripts": {
+      "$userId": {
+        ".read": "auth != null && auth.uid === $userId",
+        ".write": "auth != null && auth.uid === $userId",
+        "$transcriptId": {
+          ".validate": "newData.hasChildren(['role', 'text', 'timestamp', 'userId'])",
+          "role": { ".validate": "newData.val() === 'user' || newData.val() === 'model' || newData.val() === 'system'" },
+          "text": { ".validate": "newData.isString() && newData.val().length <= 5000" },
+          "timestamp": { ".validate": "newData.isNumber()" },
+          "userId": { ".validate": "newData.val() === $userId" }
+        }
+      }
+    },
+    "tool_logs": {
+      "$userId": {
+        ".read": "auth != null && auth.uid === $userId",
+        ".write": "auth != null && auth.uid === $userId",
+        "$logId": {
+          ".validate": "newData.hasChildren(['name', 'status', 'timestamp', 'userId'])",
+          "name": { ".validate": "newData.isString() && newData.val().length <= 100" },
+          "status": { ".validate": "newData.val() === 'executing' || newData.val() === 'completed' || newData.val() === 'failed'" },
+          "timestamp": { ".validate": "newData.isNumber()" },
+          "userId": { ".validate": "newData.val() === $userId" }
+        }
+      }
+    },
+    "user_configs": {
+      "$userId": {
+        ".read": "auth != null && auth.uid === $userId",
+        ".write": "auth != null && auth.uid === $userId",
+        ".validate": "newData.hasChildren(['voiceName', 'userId'])",
+        "voiceName": { ".validate": "newData.val() === 'Zephyr' || newData.val() === 'Puck' || newData.val() === 'Charon' || newData.val() === 'Kore' || newData.val() === 'Fenrir'" },
+        "systemInstruction": { ".validate": "newData.isString() && newData.val().length <= 2000" },
+        "userId": { ".validate": "newData.val() === $userId" }
+      }
+    },
+    "saved_sessions": {
+      "$userId": {
+        ".read": "auth != null && auth.uid === $userId",
+        ".write": "auth != null && auth.uid === $userId",
+        "$sessionId": {
+          ".validate": "newData.hasChildren(['userId', 'title', 'timestamp'])",
+          "userId": { ".validate": "newData.val() === $userId" },
+          "title": { ".validate": "newData.isString()" },
+          "timestamp": { ".validate": "newData.isNumber()" }
+        }
+      }
+    },
+    "whatsapp_store": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

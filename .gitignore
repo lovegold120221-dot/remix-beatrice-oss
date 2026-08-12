@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Google OAuth credentials (client secret - never commit)
+google-*-credentials.json
+*-client-secret.json
+credentials.json
+data/

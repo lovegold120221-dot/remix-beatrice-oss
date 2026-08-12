@@ -1,0 +1,11 @@
+{
+  "name": "Remix Beatrice OSS",
+  "description": "Multimodal Voice \u0026 Video Assistant powered by Eburon Live API with real-time audio, live video stream, function tools, code sandbox execution, CLI, and multi-agent capabilities.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

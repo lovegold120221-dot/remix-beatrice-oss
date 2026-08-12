@@ -1,0 +1,152 @@
+@import "tailwindcss";
+
+body {
+  font-family: var(--font-sans);
+}
+
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  touch-action: manipulation;
+}
+
+@theme {
+  --font-sans: 'Roboto', 'Helvetica Neue', system-ui, -apple-system, sans-serif;
+  --color-ai-1: #e67e22;
+  --color-ai-2: #8e44ad;
+  --color-ai-3: #f1c40f;
+  --color-bg-base: #050505;
+  --color-bg-elevated: rgba(20, 20, 22, 0.65);
+  --color-beatrice-cyan: #00f2fe;
+  --color-beatrice-blue: #4facfe;
+  --color-beatrice-card: #121215;
+  --color-beatrice-panel: #0a0a0c;
+  --color-beatrice-muted: #8e8e93;
+}
+
+@layer components {
+  .b-page {
+    @apply bg-[#050505] text-white;
+  }
+  .b-modal-overlay {
+    @apply fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xl p-4;
+    animation: fadeInUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .b-modal {
+    @apply w-full bg-[#0a0a0c] border border-white/10 rounded-[32px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] backdrop-blur-2xl;
+  }
+  .b-modal-header {
+    @apply px-6 py-5 bg-black/60 border-b border-white/10 flex items-center justify-between;
+  }
+  .b-modal-body {
+    @apply p-6 overflow-y-auto space-y-6 text-xs text-zinc-300;
+  }
+  .b-modal-footer {
+    @apply p-4 bg-black/60 border-t border-white/10 flex justify-end;
+  }
+  .b-card {
+    @apply p-4 rounded-2xl bg-[#121215] border border-white/10;
+  }
+  .b-panel {
+    @apply bg-black/40 backdrop-blur-2xl rounded-3xl border border-white/5 overflow-hidden;
+  }
+  .b-input {
+    @apply w-full bg-black/60 border border-white/10 focus:border-[#00f2fe]/60 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none placeholder:text-[#8e8e93];
+  }
+  .b-btn {
+    @apply px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-white text-xs font-semibold transition-all active:scale-95 cursor-pointer;
+  }
+  .b-btn-primary {
+    @apply px-5 py-2.5 rounded-full bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-xs transition-all shadow-lg shadow-[#00f2fe]/20 active:scale-95 cursor-pointer;
+  }
+  .b-chip {
+    @apply px-3 py-1.5 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-[#8e8e93] transition-all;
+  }
+  .b-chip-active {
+    @apply bg-[#00f2fe]/15 border-[#00f2fe]/40 text-[#00f2fe];
+  }
+  .b-icon-btn {
+    @apply w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all active:scale-90 hover:bg-white/15 cursor-pointer;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@layer utilities {
+  .plasma-blob {
+    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+    mix-blend-mode: screen;
+    animation: morph 8s ease-in-out infinite, spin 12s linear infinite;
+    transition: all 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+  }
+
+  .animate-fade-in {
+    animation: fadeInUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes morph {
+  0% { border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
+  34% { border-radius: 70% 30% 50% 50% / 30% 30% 70% 70%; }
+  67% { border-radius: 100% 60% 60% 100% / 100% 100% 60% 60%; }
+  100% { border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
+}
+
+@keyframes spin {
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes spin-reverse {
+  100% { transform: rotate(-360deg); }
+}
+
+@keyframes pulse-core {
+  0% { transform: scale(0.9); opacity: 0.7; }
+  100% { transform: scale(1.1); opacity: 1; }
+}
+
+@keyframes breathe-btn {
+  0% { transform: scale(1); box-shadow: 0 16px 32px -8px rgba(79, 172, 254, 0.5); }
+  100% { transform: scale(1.05); box-shadow: 0 24px 48px -4px rgba(79, 172, 254, 0.5); }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+@keyframes eq-bounce {
+  0% { height: 6px; }
+  100% { height: 24px; }
+}
+
+.home-indicator {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 35%;
+  height: 5px;
+  background-color: rgba(255,255,255,0.3);
+  border-radius: 10px;
+}

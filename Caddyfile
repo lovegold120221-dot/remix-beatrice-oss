@@ -1,0 +1,17 @@
+# Caddyfile for oss.eburon.ai
+# Run with: caddy run --config Caddyfile
+# or install caddy and put in /etc/caddy/Caddyfile
+
+oss.eburon.ai {
+    # Reverse proxy to the Node app on port 5555
+    reverse_proxy localhost:5555
+
+    # Let's Encrypt is automatic (email optional)
+    # email your@email.com
+
+    # Optional: increase timeouts for long WS connections
+    # timeouts {
+    #     read 300s
+    #     write 300s
+    # }
+}

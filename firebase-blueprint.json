@@ -1,0 +1,116 @@
+{
+  "entities": {
+    "Transcript": {
+      "title": "Transcript",
+      "description": "Conversation transcript message between user and Beatrice AI",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["user", "model", "system"]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "timestamp": {
+          "type": "number"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": ["role", "text", "timestamp", "userId"]
+    },
+    "ToolLog": {
+      "title": "ToolLog",
+      "description": "Log of Beatrice autonomous function execution",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "args": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "result": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["executing", "completed", "failed"]
+        },
+        "timestamp": {
+          "type": "number"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": ["name", "status", "timestamp", "userId"]
+    },
+    "UserConfig": {
+      "title": "UserConfig",
+      "description": "Custom configuration for Beatrice persona and tools",
+      "type": "object",
+      "properties": {
+        "voiceName": {
+          "type": "string",
+          "enum": ["Zephyr", "Puck", "Charon", "Kore", "Fenrir"]
+        },
+        "systemInstruction": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "videoFps": {
+          "type": "number"
+        },
+        "enableSandboxTool": {
+          "type": "boolean"
+        },
+        "enableCliTool": {
+          "type": "boolean"
+        },
+        "enableAgentTool": {
+          "type": "boolean"
+        },
+        "enableWebSearchTool": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "number"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": ["voiceName", "systemInstruction", "userId"]
+    }
+  },
+  "firestore": {
+    "/transcripts/{transcriptId}": {
+      "schema": {
+        "$ref": "#/entities/Transcript"
+      },
+      "description": "User conversation transcripts"
+    },
+    "/tool_logs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/ToolLog"
+      },
+      "description": "Executed tool action logs"
+    },
+    "/user_configs/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserConfig"
+      },
+      "description": "User specific app configuration"
+    }
+  }
+}
