@@ -53,10 +53,16 @@ Always run `npm run lint` for verification. No test script or tests exist.
 - For local outside AI Studio: camera/mic + valid GEMINI_API_KEY needed for core features; Google OAuth for workspace tools; WhatsApp requires phone pairing via Baileys.
 
 ## Production (Let's Encrypt + domain)
-- Run the Node app on port 5555 (plain HTTP).
+- Build with `npm run build`, then run `node dist/server.cjs` on port 5555 (plain HTTP).
+- The live deployment uses systemd service `/etc/systemd/system/beatrice-oss.service`:
+  - WorkingDirectory: `/root/remix-beatrice-oss`
+  - EnvironmentFile: `/root/remix-beatrice-oss/.env.local`
+  - ExecStart: `/usr/bin/node dist/server.cjs`
+  - Restart: always
+  - Run `systemctl daemon-reload && systemctl restart beatrice-oss.service` after deploy.
 - Use reverse proxy for HTTPS:
   - **Recommended (easiest):** Caddy (see Caddyfile) — auto Let's Encrypt.
-   - Alternative: Nginx + certbot (see nginx-oss.conf).
+  - Alternative: Nginx + certbot (see nginx-oss.conf).
 - Set `APP_URL=https://oss.eburon.ai` and `PORT=5555`.
 - Proxy must forward `X-Forwarded-Proto` and `Upgrade`/`Connection` headers for WebSocket.
 

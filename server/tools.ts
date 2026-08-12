@@ -24,6 +24,30 @@ export interface ToolContext {
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 const DASHSCOPE_BASE = 'https://dashscope-intl.aliyuncs.com/api/v1';
 
+// Fallback model chains. Primary first. Used when a call fails or polling reports failure.
+const QWEN_IMAGE_MODELS = ['wan2.7-image-pro', 'wan2.7-image'];
+const QWEN_VIDEO_MODELS = ['wan2.7-t2v', 'wan2.7-t2v-plus', 'wan2.7-t2v-i2v']; // i2v only as last resort for t2v
+const QWEN_TTS_MODELS = ['qwen3-tts-flash', 'qwen3-tts'];
+
+// Generic helper: try each model in the chain until one succeeds or all fail.
+async function tryModelChain<T>(
+  models: string[],
+  makeCall: (model: string) => Promise<T>,
+  predicate: (result: T) => boolean
+): Promise<{ result: T; model: string } | { error: string; attempted: string[] }> {
+  const attempted: string[] = [];
+  for (const model of models) {
+    try {
+      const result = await makeCall(model);
+      if (predicate(result)) return { result, model };
+      attempted.push(model);
+    } catch (err: any) {
+      attempted.push(model);
+    }
+  }
+  return { error: `All models failed: ${attempted.join(', ')}`, attempted };
+}
+
 function redactKey(text: string) {
   if (!DASHSCOPE_API_KEY) return text;
   return text.replace(new RegExp(DASHSCOPE_API_KEY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '[REDACTED]');
@@ -501,110 +525,124 @@ export async function handleGenerateVideo(
   }
 
   const taskId = `vid_${Date.now()}`;
-  const body = {
-    model: 'wan2.7-t2v',
-    input: { prompt: args.prompt },
-    parameters: {
-      resolution: args.resolution || '720P',
-      ratio: args.ratio || '16:9',
-      prompt_extend: args.prompt_extend !== false,
-      watermark: args.watermark !== false,
-      duration: args.duration || 15,
-    },
-  };
-
-  ctx.broadcast({
-    type: 'videoGenerationUpdate',
-    task: {
-      id: taskId,
-      prompt: args.prompt,
-      status: 'submitting',
-      progress: 5,
-      timestamp: Date.now(),
-    },
-  });
-
-  try {
-    const submitRes = await fetch('https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis', {
-      method: 'POST',
-      headers: {
-        'X-DashScope-Async': 'enable',
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+  // Shuffle model fallback for the simpler DashScope video tool too.
+  const preferredModels = args.resolution === '1080P' ? ['wan2.7-t2v-plus', 'wan2.7-t2v'] : ['wan2.7-t2v', 'wan2.7-t2v-plus'];
+  let lastError = '';
+  for (const model of preferredModels) {
+    const body = {
+      model,
+      input: { prompt: args.prompt },
+      parameters: {
+        resolution: args.resolution || '720P',
+        ratio: args.ratio || '16:9',
+        prompt_extend: args.prompt_extend !== false,
+        watermark: args.watermark !== false,
+        duration: args.duration || 15,
       },
-      body: JSON.stringify(body),
-    });
-
-    if (!submitRes.ok) {
-      const errText = await submitRes.text().catch(() => 'unknown error');
-      const safeError = errText.replace(new RegExp(apiKey, 'g'), '[REDACTED]');
-      ctx.broadcast({
-        type: 'videoGenerationUpdate',
-        task: { id: taskId, status: 'failed', error: safeError, timestamp: Date.now() },
-      });
-      return { success: false, error: safeError };
-    }
-
-    const submitData = (await submitRes.json()) as { output?: { task_id?: string; task_status?: string }; request_id?: string };
-    const dashTaskId = submitData.output?.task_id;
-    const requestId = submitData.request_id;
-
-    if (!dashTaskId) {
-      return { success: false, error: 'No task_id returned from DashScope' };
-    }
+    };
 
     ctx.broadcast({
       type: 'videoGenerationUpdate',
       task: {
         id: taskId,
-        dashTaskId,
-        requestId,
+        model,
         prompt: args.prompt,
-        status: 'queued',
-        progress: 10,
+        status: 'submitting',
+        progress: 5,
         timestamp: Date.now(),
       },
     });
 
-    // Poll async status
-    const videoUrl = await pollDashscopeVideoTask(dashTaskId, apiKey, (status, progress, url, error) => {
+    try {
+      const submitRes = await fetch('https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis', {
+        method: 'POST',
+        headers: {
+          'X-DashScope-Async': 'enable',
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!submitRes.ok) {
+        const errText = await submitRes.text().catch(() => 'unknown error');
+        lastError = errText.replace(new RegExp(apiKey, 'g'), '[REDACTED]');
+        ctx.broadcast({
+          type: 'videoGenerationUpdate',
+          task: { id: taskId, model, status: 'failed', error: lastError, timestamp: Date.now() },
+        });
+        continue; // try next model
+      }
+
+      const submitData = (await submitRes.json()) as { output?: { task_id?: string; task_status?: string }; request_id?: string };
+      const dashTaskId = submitData.output?.task_id;
+      const requestId = submitData.request_id;
+
+      if (!dashTaskId) {
+        lastError = 'No task_id returned from DashScope';
+        continue;
+      }
+
       ctx.broadcast({
         type: 'videoGenerationUpdate',
         task: {
           id: taskId,
+          model,
           dashTaskId,
           requestId,
           prompt: args.prompt,
-          status,
-          progress,
-          videoUrl: url,
-          error,
+          status: 'queued',
+          progress: 10,
           timestamp: Date.now(),
         },
       });
-    });
 
-    if (videoUrl) {
-      return {
-        success: true,
-        taskId,
-        dashTaskId,
-        requestId,
-        videoUrl,
-        prompt: args.prompt,
-        message: 'Video generated successfully. Check the Video Generation panel to view/download.',
-      };
+      const videoUrl = await pollDashscopeVideoTask(dashTaskId, apiKey, (status, progress, url, error) => {
+        ctx.broadcast({
+          type: 'videoGenerationUpdate',
+          task: {
+            id: taskId,
+            model,
+            dashTaskId,
+            requestId,
+            prompt: args.prompt,
+            status,
+            progress,
+            videoUrl: url,
+            error,
+            timestamp: Date.now(),
+          },
+        });
+      });
+
+      if (videoUrl) {
+        return {
+          success: true,
+          taskId,
+          model,
+          dashTaskId,
+          requestId,
+          videoUrl,
+          prompt: args.prompt,
+          message: 'Video generated successfully. Check the Video Generation panel to view/download.',
+        };
+      }
+
+      lastError = 'Video generation did not produce a URL';
+    } catch (err: any) {
+      lastError = (err.message || String(err)).replace(new RegExp(apiKey, 'g'), '[REDACTED]');
+      ctx.broadcast({
+        type: 'videoGenerationUpdate',
+        task: { id: taskId, model, status: 'failed', error: lastError, timestamp: Date.now() },
+      });
     }
-
-    return { success: false, taskId, dashTaskId, error: 'Video generation did not produce a URL' };
-  } catch (err: any) {
-    const safeError = (err.message || String(err)).replace(new RegExp(apiKey, 'g'), '[REDACTED]');
-    ctx.broadcast({
-      type: 'videoGenerationUpdate',
-      task: { id: taskId, status: 'failed', error: safeError, timestamp: Date.now() },
-    });
-    return { success: false, error: safeError };
   }
+
+  ctx.broadcast({
+    type: 'videoGenerationUpdate',
+    task: { id: taskId, status: 'failed', error: lastError || 'All models failed', timestamp: Date.now() },
+  });
+  return { success: false, taskId, error: lastError || 'All models failed' };
 }
 
 async function pollDashscopeVideoTask(
@@ -725,70 +763,67 @@ export async function handleQwenImageGenerate(
     task: { id: taskId, kind: 'image', prompt: args.prompt, status: 'submitting', progress: 5, timestamp: Date.now() },
   });
   try {
-    const body: any = {
-      model: args.model || 'wan2.7-image-pro',
-      input: {
-        messages: [{ role: 'user', content: [{ text: args.prompt }] }],
-      },
-      parameters: {
-        size: args.size || '2K',
-        n: args.n || 1,
-        watermark: args.watermark ?? false,
-      },
-    };
-    if (args.thinking_mode !== undefined) body.parameters.thinking_mode = args.thinking_mode;
-    if (args.enable_sequential) body.parameters.enable_sequential = true;
+    const chainResult = await tryModelChain(
+      args.model ? [args.model] : QWEN_IMAGE_MODELS,
+      async (model) => {
+        const body: any = {
+          model,
+          input: { messages: [{ role: 'user', content: [{ text: args.prompt }] }] },
+          parameters: { size: args.size || '2K', n: args.n || 1, watermark: args.watermark ?? false },
+        };
+        if (args.thinking_mode !== undefined) body.parameters.thinking_mode = args.thinking_mode;
+        if (args.enable_sequential) body.parameters.enable_sequential = true;
 
-    const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/image-generation/generation`, {
-      method: 'POST',
-      headers: {
-        'X-DashScope-Async': 'enable',
-        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+        const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/image-generation/generation`, {
+          method: 'POST',
+          headers: { 'X-DashScope-Async': 'enable', Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
 
-    if (!submitRes.ok) {
-      const errText = await submitRes.text().catch(() => 'unknown error');
-      const safeError = redactKey(errText);
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', status: 'failed', error: safeError, timestamp: Date.now() } });
-      return { success: false, error: safeError };
-    }
-
-    const submitData = (await submitRes.json()) as { output?: { task_id?: string; task_status?: string }; request_id?: string };
-    const dashTaskId = submitData.output?.task_id;
-    const requestId = submitData.request_id;
-    if (!dashTaskId) {
-      return { success: false, error: 'No task_id returned from QwenCloud' };
-    }
-
-    ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', dashTaskId, requestId, prompt: args.prompt, status: 'queued', progress: 10, timestamp: Date.now() } });
-    const result = await pollDashscopeTask(dashTaskId, 'image', (status, progress, urls, error) => {
-      ctx.broadcast({
-        type: 'qwencloudUpdate',
-        task: { id: taskId, kind: 'image', dashTaskId, requestId, prompt: args.prompt, status, progress, urls, error, timestamp: Date.now() },
-      });
-    });
-
-    // Upload images to Firebase Storage
-    const firebaseUrls: string[] = [];
-    if (result.urls?.length) {
-      for (const url of result.urls) {
-        try {
-          const fetchRes = await fetch(url);
-          const buffer = Buffer.from(await fetchRes.arrayBuffer());
-          const base64data = buffer.toString('base64');
-          const ext = url.split('/').pop() || 'image';
-          const firebaseUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'image'};base64,${base64data}`, ext, 'qwen-images');
-          firebaseUrls.push(firebaseUrl);
-        } catch (e) {
-          console.error('Firebase upload error:', e);
+        if (!submitRes.ok) {
+          const errText = await submitRes.text().catch(() => 'unknown error');
+          return { success: false, error: redactKey(errText), rawModel: model };
         }
-      }
+
+        const submitData = (await submitRes.json()) as { output?: { task_id?: string; task_status?: string }; request_id?: string };
+        const dashTaskId = submitData.output?.task_id;
+        const requestId = submitData.request_id;
+        if (!dashTaskId) return { success: false, error: 'No task_id returned from QwenCloud', rawModel: model };
+
+        ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', dashTaskId, requestId, model, prompt: args.prompt, status: 'queued', progress: 10, timestamp: Date.now() } });
+        const result = await pollDashscopeTask(dashTaskId, 'image', (status, progress, urls, error) => {
+          ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', dashTaskId, requestId, model, prompt: args.prompt, status, progress, urls, error, timestamp: Date.now() } });
+        });
+
+        // Upload images to Firebase Storage
+        const firebaseUrls: string[] = [];
+        if (result.urls?.length) {
+          for (const url of result.urls) {
+            try {
+              const fetchRes = await fetch(url);
+              const buffer = Buffer.from(await fetchRes.arrayBuffer());
+              const base64data = buffer.toString('base64');
+              const ext = url.split('/').pop() || 'image';
+              const firebaseUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'image'};base64,${base64data}`, ext, 'qwen-images');
+              firebaseUrls.push(firebaseUrl);
+            } catch (e) {
+              console.error('Firebase upload error:', e);
+            }
+          }
+        }
+
+        return { success: !!result.urls?.length, taskId, dashTaskId, requestId, model, urls: result.urls || [], firebaseUrls, message: result.urls?.length ? 'Images generated successfully.' : 'No image URLs returned.' };
+      },
+      (r) => r.success && (r.urls?.length ?? 0) > 0
+    );
+
+    if ('error' in chainResult) {
+      const safeError = chainResult.error;
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', status: 'failed', error: safeError, attempted: chainResult.attempted, timestamp: Date.now() } });
+      return { success: false, error: safeError, attemptedModels: chainResult.attempted };
     }
 
-    return { success: !!result.urls?.length, taskId, dashTaskId, requestId, urls: result.urls || [], firebaseUrls, message: result.urls?.length ? 'Images generated successfully.' : 'No image URLs returned.' };
+    return chainResult.result;
   } catch (err: any) {
     const safeError = redactKey(err.message || String(err));
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', status: 'failed', error: safeError, timestamp: Date.now() } });
@@ -814,59 +849,59 @@ export async function handleQwenImageEdit(
   const taskId = `qwen_edit_${Date.now()}`;
   ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', prompt: args.instruction, status: 'submitting', progress: 5, timestamp: Date.now() } });
   try {
-    const content: any[] = [{ text: args.instruction }];
-    for (const img of args.images || []) content.push({ image: img });
-    const body: any = {
-      model: args.model || 'wan2.7-image-pro',
-      input: { messages: [{ role: 'user', content }] },
-      parameters: { size: args.size || '2K', n: args.n || 1, watermark: args.watermark ?? false },
-    };
-    if (args.bbox_list) body.parameters.bbox_list = args.bbox_list;
+    const chainResult = await tryModelChain(
+      args.model ? [args.model] : QWEN_IMAGE_MODELS,
+      async (model) => {
+        const content: any[] = [{ text: args.instruction }];
+        for (const img of args.images || []) content.push({ image: img });
+        const body: any = {
+          model,
+          input: { messages: [{ role: 'user', content }] },
+          parameters: { size: args.size || '2K', n: args.n || 1, watermark: args.watermark ?? false },
+        };
+        if (args.bbox_list) body.parameters.bbox_list = args.bbox_list;
 
-    const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/image-generation/generation`, {
-      method: 'POST',
-      headers: {
-        'X-DashScope-Async': 'enable',
-        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+        const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/image-generation/generation`, {
+          method: 'POST',
+          headers: { 'X-DashScope-Async': 'enable', Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
 
-    if (!submitRes.ok) {
-      const errText = await submitRes.text().catch(() => 'unknown error');
-      const safeError = redactKey(errText);
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', status: 'failed', error: safeError, timestamp: Date.now() } });
-      return { success: false, error: safeError };
-    }
+        if (!submitRes.ok) return { success: false, error: redactKey(await submitRes.text().catch(() => 'unknown error')), rawModel: model };
 
-    const submitData = (await submitRes.json()) as { output?: { task_id?: string } };
-    const dashTaskId = submitData.output?.task_id;
-    if (!dashTaskId) return { success: false, error: 'No task_id returned' };
+        const submitData = (await submitRes.json()) as { output?: { task_id?: string } };
+        const dashTaskId = submitData.output?.task_id;
+        if (!dashTaskId) return { success: false, error: 'No task_id returned', rawModel: model };
 
-    ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', dashTaskId, prompt: args.instruction, status: 'queued', progress: 10, timestamp: Date.now() } });
-    const result = await pollDashscopeTask(dashTaskId, 'image', (status, progress, urls, error) => {
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', dashTaskId, prompt: args.instruction, status, progress, urls, error, timestamp: Date.now() } });
-    });
+        ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', dashTaskId, model, prompt: args.instruction, status: 'queued', progress: 10, timestamp: Date.now() } });
+        const result = await pollDashscopeTask(dashTaskId, 'image', (status, progress, urls, error) => {
+          ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', dashTaskId, model, prompt: args.instruction, status, progress, urls, error, timestamp: Date.now() } });
+        });
 
-    // Upload images to Firebase Storage
-    const firebaseUrls: string[] = [];
-    if (result.urls?.length) {
-      for (const url of result.urls) {
-        try {
-          const fetchRes = await fetch(url);
-          const buffer = Buffer.from(await fetchRes.arrayBuffer());
-          const base64data = buffer.toString('base64');
-          const ext = url.split('/').pop() || 'image';
-          const firebaseUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'image'};base64,${base64data}`, ext, 'qwen-images-edits');
-          firebaseUrls.push(firebaseUrl);
-        } catch (e) {
-          console.error('Firebase upload error:', e);
+        const firebaseUrls: string[] = [];
+        if (result.urls?.length) {
+          for (const url of result.urls) {
+            try {
+              const fetchRes = await fetch(url);
+              const buffer = Buffer.from(await fetchRes.arrayBuffer());
+              const base64data = buffer.toString('base64');
+              const ext = url.split('/').pop() || 'image';
+              const firebaseUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'image'};base64,${base64data}`, ext, 'qwen-images-edits');
+              firebaseUrls.push(firebaseUrl);
+            } catch (e) { console.error('Firebase upload error:', e); }
+          }
         }
-      }
-    }
 
-    return { success: !!result.urls?.length, taskId, dashTaskId, urls: result.urls || [], firebaseUrls };
+        return { success: !!result.urls?.length, taskId, dashTaskId, model, urls: result.urls || [], firebaseUrls };
+      },
+      (r) => r.success && (r.urls?.length ?? 0) > 0
+    );
+
+    if ('error' in chainResult) {
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', status: 'failed', error: chainResult.error, attempted: chainResult.attempted, timestamp: Date.now() } });
+      return { success: false, error: chainResult.error, attemptedModels: chainResult.attempted };
+    }
+    return chainResult.result;
   } catch (err: any) {
     const safeError = redactKey(err.message || String(err));
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', status: 'failed', error: safeError, timestamp: Date.now() } });
@@ -893,63 +928,62 @@ export async function handleQwenVideoGenerate(
   const taskId = `qwen_vid_${Date.now()}`;
   ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', prompt: args.prompt, status: 'submitting', progress: 5, timestamp: Date.now() } });
   try {
-    const input: any = { prompt: args.prompt };
-    if (args.audio_url) input.audio_url = args.audio_url;
-    const body = {
-      model: args.model || 'wan2.7-t2v',
-      input,
-      parameters: {
-        resolution: args.resolution || '720P',
-        ratio: args.ratio || '16:9',
-        prompt_extend: args.prompt_extend !== false,
-        watermark: args.watermark ?? false,
-        duration: args.duration || 15,
+    const chainResult = await tryModelChain(
+      args.model ? [args.model] : QWEN_VIDEO_MODELS,
+      async (model) => {
+        const input: any = { prompt: args.prompt };
+        if (args.audio_url) input.audio_url = args.audio_url;
+        const body = {
+          model,
+          input,
+          parameters: {
+            resolution: args.resolution || '720P',
+            ratio: args.ratio || '16:9',
+            prompt_extend: args.prompt_extend !== false,
+            watermark: args.watermark ?? false,
+            duration: args.duration || 15,
+          },
+        };
+
+        const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/video-generation/video-synthesis`, {
+          method: 'POST',
+          headers: { 'X-DashScope-Async': 'enable', Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+
+        if (!submitRes.ok) return { success: false, error: redactKey(await submitRes.text().catch(() => 'unknown error')), rawModel: model };
+
+        const submitData = (await submitRes.json()) as { output?: { task_id?: string }; request_id?: string };
+        const dashTaskId = submitData.output?.task_id;
+        const requestId = submitData.request_id;
+        if (!dashTaskId) return { success: false, error: 'No task_id returned', rawModel: model };
+
+        ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', dashTaskId, requestId, model, prompt: args.prompt, status: 'queued', progress: 10, timestamp: Date.now() } });
+        const result = await pollDashscopeTask(dashTaskId, 'video', (status, progress, urls, error) => {
+          ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', dashTaskId, requestId, model, prompt: args.prompt, status, progress, urls, error, timestamp: Date.now() } });
+        });
+
+        let firebaseUrl: string = '';
+        if (result.urls?.length) {
+          try {
+            const url = result.urls[0];
+            const fetchRes = await fetch(url);
+            const buffer = Buffer.from(await fetchRes.arrayBuffer());
+            const base64data = buffer.toString('base64');
+            firebaseUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'video'};base64,${base64data}`, 'mp4', 'qwen-videos');
+          } catch (e) { console.error('Firebase upload error:', e); }
+        }
+
+        return { success: !!result.urls?.length, taskId, dashTaskId, requestId, model, videoUrl: result.urls?.[0], urls: result.urls || [], firebaseUrl };
       },
-    };
+      (r) => r.success && (r.urls?.length ?? 0) > 0
+    );
 
-    const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/video-generation/video-synthesis`, {
-      method: 'POST',
-      headers: {
-        'X-DashScope-Async': 'enable',
-        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!submitRes.ok) {
-      const errText = await submitRes.text().catch(() => 'unknown error');
-      const safeError = redactKey(errText);
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', status: 'failed', error: safeError, timestamp: Date.now() } });
-      return { success: false, error: safeError };
+    if ('error' in chainResult) {
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', status: 'failed', error: chainResult.error, attempted: chainResult.attempted, timestamp: Date.now() } });
+      return { success: false, error: chainResult.error, attemptedModels: chainResult.attempted };
     }
-
-    const submitData = (await submitRes.json()) as { output?: { task_id?: string }; request_id?: string };
-    const dashTaskId = submitData.output?.task_id;
-    const requestId = submitData.request_id;
-    if (!dashTaskId) return { success: false, error: 'No task_id returned' };
-
-    ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', dashTaskId, requestId, prompt: args.prompt, status: 'queued', progress: 10, timestamp: Date.now() } });
-    const result = await pollDashscopeTask(dashTaskId, 'video', (status, progress, urls, error) => {
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', dashTaskId, requestId, prompt: args.prompt, status, progress, urls, error, timestamp: Date.now() } });
-    });
-
-    // Upload video to Firebase Storage
-    let firebaseUrl: string = '';
-    if (result.urls?.length) {
-      try {
-        const url = result.urls[0];
-        const fetchRes = await fetch(url);
-        const buffer = Buffer.from(await fetchRes.arrayBuffer());
-        const base64data = buffer.toString('base64');
-        const firebaseUrlResult = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'video'};base64,${base64data}`, 'mp4', 'qwen-videos');
-        firebaseUrl = firebaseUrlResult;
-      } catch (e) {
-        console.error('Firebase upload error:', e);
-      }
-    }
-
-    return { success: !!result.urls?.length, taskId, dashTaskId, requestId, videoUrl: result.urls?.[0], urls: result.urls || [], firebaseUrl };
+    return chainResult.result;
   } catch (err: any) {
     const safeError = redactKey(err.message || String(err));
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', status: 'failed', error: safeError, timestamp: Date.now() } });
@@ -972,38 +1006,43 @@ export async function handleQwenTts(
   const taskId = `qwen_tts_${Date.now()}`;
   ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', prompt: args.text, status: 'running', progress: 10, timestamp: Date.now() } });
   try {
-    const res = await fetch(`${DASHSCOPE_BASE}/services/aigc/multimodal-generation/generation`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
-        'Content-Type': 'application/json',
+    const chainResult = await tryModelChain(
+      args.model ? [args.model] : QWEN_TTS_MODELS,
+      async (model) => {
+        const res = await fetch(`${DASHSCOPE_BASE}/services/aigc/multimodal-generation/generation`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            input: { text: args.text, voice: args.voice || 'Cherry', language_type: args.language_type || 'Auto' },
+          }),
+        });
+        const data = (await res.json()) as any;
+        if (!res.ok) return { success: false, error: redactKey(data.message || await res.text().catch(() => 'unknown error')), rawModel: model };
+        const audioUrl = data.output?.audio?.url;
+        let firebaseAudioUrl: string = '';
+        if (audioUrl) {
+          try {
+            const fetchRes = await fetch(audioUrl);
+            const buffer = Buffer.from(await fetchRes.arrayBuffer());
+            const base64data = buffer.toString('base64');
+            firebaseAudioUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'audio'};base64,${base64data}`, 'mp3', 'qwen-tts');
+          } catch (e) { console.error('Firebase upload error:', e); }
+        }
+        return { success: !!audioUrl, taskId, model, audioUrl, firebaseAudioUrl, text: args.text };
       },
-      body: JSON.stringify({
-        model: args.model || 'qwen3-tts-flash',
-        input: {
-          text: args.text,
-          voice: args.voice || 'Cherry',
-          language_type: args.language_type || 'Auto',
-        },
-      }),
-    });
-    const data = (await res.json()) as any;
-    const audioUrl = data.output?.audio?.url;
-    // Upload audio to Firebase Storage
-    let firebaseAudioUrl: string = '';
-    if (audioUrl) {
-      try {
-        const fetchRes = await fetch(audioUrl);
-        const buffer = Buffer.from(await fetchRes.arrayBuffer());
-        const base64data = buffer.toString('base64');
-        firebaseAudioUrl = await uploadMediaToFirebaseStorage(`data:${fetchRes.headers.get('content-type') || 'audio'};base64,${base64data}`, 'mp3', 'qwen-tts');
-      } catch (e) {
-        console.error('Firebase upload error:', e);
-      }
+      (r) => r.success && !!r.audioUrl
+    );
+
+    if ('error' in chainResult) {
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', status: 'failed', error: chainResult.error, attempted: chainResult.attempted, timestamp: Date.now() } });
+      return { success: false, error: chainResult.error, attemptedModels: chainResult.attempted };
     }
-    const done = { id: taskId, kind: 'tts', prompt: args.text, status: audioUrl ? 'completed' : 'failed', progress: audioUrl ? 100 : 0, audioUrl, error: audioUrl ? undefined : 'No audio URL returned', timestamp: Date.now() };
+
+    const res = chainResult.result;
+    const done = { id: taskId, kind: 'tts', prompt: args.text, status: res.audioUrl ? 'completed' : 'failed', progress: res.audioUrl ? 100 : 0, model: res.model, audioUrl: res.audioUrl, error: res.audioUrl ? undefined : 'No audio URL returned', timestamp: Date.now() };
     ctx.broadcast({ type: 'qwencloudUpdate', task: done });
-    return { success: !!audioUrl, taskId, audioUrl, firebaseAudioUrl, text: args.text };
+    return res;
   } catch (err: any) {
     const safeError = redactKey(err.message || String(err));
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', status: 'failed', error: safeError, timestamp: Date.now() } });
