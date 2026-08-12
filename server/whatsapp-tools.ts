@@ -2,17 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
 import QRCode from 'qrcode';
-import {
-  makeWASocket,
-  useMultiFileAuthState,
-  makeCacheableSignalKeyStore,
-  downloadMediaMessage,
-  getContentType,
-  jidNormalizedUser,
-  Browsers,
-  DisconnectReason,
-  proto,
-} from '@whiskeysockets/baileys';
+
+// Baileys is ESM-only. We load it lazily so the CommonJS production bundle can start.
+let baileys: typeof import('@whiskeysockets/baileys') | null = null;
+async function getBaileys() {
+  if (!baileys) baileys = await import('@whiskeysockets/baileys');
+  return baileys;
+}
+
 import type { WASocket, WAMessage, AnyMessageContent } from '@whiskeysockets/baileys';
 
 const AUTH_DIR =
@@ -242,14 +239,14 @@ function schedulePersist() {
   }, 4000);
 }
 
-function serializeStore() {
+async function serializeStore() {
   const chats = [...waStore.chats.values()].map((c) => ({ ...c }));
   const contacts = [...waStore.contacts.values()].map((c) => ({ ...c }));
   const calls = [...waStore.calls].slice(-100);
   const messages: Record<string, any[]> = {};
   for (const [jid, list] of waStore.messages) {
-    const recent = list.slice(-30).map((m) => {
-      const { text, type, meta } = messageText(m);
+    const recent = await Promise.all(list.slice(-30).map(async (m) => {
+      const { text, type, meta } = await messageText(m);
       return {
         key: {
           id: m.key?.id,
@@ -264,14 +261,14 @@ function serializeStore() {
         meta: meta || null,
         stub: m.messageStubType ? String(m.messageStubType) : undefined,
       };
-    });
+    }));
     messages[jid] = recent;
   }
   return { updatedAt: Date.now(), chats, contacts, calls, messages };
 }
 
 async function persistStore() {
-  const data = serializeStore();
+  const data = await serializeStore();
   // Primary: Firebase RTDB
   try {
     const db = await initRTDB();
@@ -554,6 +551,13 @@ async function connectSocket(): Promise<void> {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
+  const {
+    makeWASocket,
+    useMultiFileAuthState,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    DisconnectReason,
+  } = await getBaileys();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const logger = pino({ level: 'silent' });
 
@@ -662,7 +666,7 @@ async function connectSocket(): Promise<void> {
   sock.ev.on('messaging-history.set', seedFromHistorySync);
   sock.ev.on('messages.upsert', ({ messages }: { messages: WAMessage[] }) => {
     for (const m of messages) pushMessage(m);
-    broadcastIncomingMessages(messages);
+    void broadcastIncomingMessages(messages);
   });
   sock.ev.on('messages.update', (updates: any[]) => {
     for (const u of updates) {
@@ -735,11 +739,11 @@ function stopHeartbeat() {
   }
 }
 
-function broadcastIncomingMessages(messages: WAMessage[]) {
+async function broadcastIncomingMessages(messages: WAMessage[]) {
   if (broadcastFns.size === 0) return;
-  const items = messages
-    .map((m) => {
-      const { text, type } = messageText(m);
+  const items = (await Promise.all(messages
+    .map(async (m) => {
+      const { text, type } = await messageText(m);
       if (!text || m.key?.id?.startsWith('3A')) return null;
       return {
         id: m.key?.id,
@@ -751,7 +755,7 @@ function broadcastIncomingMessages(messages: WAMessage[]) {
         type,
         text: String(text).slice(0, 200),
       };
-    })
+    })))
     .filter(Boolean);
   if (items.length === 0) return;
   broadcast({ type: 'whatsappIncomingMessages', messages: items });
@@ -766,19 +770,20 @@ function toUserJid(input: string): string {
   return `${digits}@s.whatsapp.net`;
 }
 
-export function resolveContact(query: string): {
+export async function resolveContact(query: string): Promise<{
   ok: boolean;
   jid?: string;
   name?: string;
   matchedBy?: string;
   candidates?: { jid: string; name: string }[];
   error?: string;
-} {
+}> {
   const q = String(query || '').trim();
   if (!q) return { ok: false, error: 'Empty query. Provide a name, phone number, or JID.' };
 
   if (q.includes('@')) {
     if (/@(s\.whatsapp\.net|g\.us|broadcast)$/.test(q)) {
+      const { jidNormalizedUser } = await getBaileys();
       const jid = jidNormalizedUser(q);
       return { ok: true, jid, name: displayNameFor(jid), matchedBy: 'jid' };
     }
@@ -936,7 +941,7 @@ async function withApproval(
 // Message helpers
 // ---------------------------------------------------------------------------
 
-function messageText(m: WAMessage): { text: string; type: string; meta?: any } {
+async function messageText(m: WAMessage): Promise<{ text: string; type: string; meta?: any }> {
   if ((m as any)._restoredText !== undefined) {
     return {
       text: String((m as any)._restoredText),
@@ -944,6 +949,7 @@ function messageText(m: WAMessage): { text: string; type: string; meta?: any } {
       meta: (m as any)._restoredMeta,
     };
   }
+  const { getContentType } = await getBaileys();
   const content = m.message ? getContentType(m.message) : null;
   if (!content) {
     if (m.messageStubType) return { text: `[${m.messageStubType}]`, type: 'stub' };
@@ -1004,18 +1010,21 @@ function msgKey(msg: WAMessage) {
   };
 }
 
-function formatMessageForContext(m: WAMessage): string | null {
-  const { text, type } = messageText(m);
-  if (type === 'stub' || type === 'unknown' || !text) return null;
-  if (m.key?.id?.startsWith('3A')) return null;
-  const sender = m.key?.fromMe ? 'Me' : displayNameFor(m.key?.participant || m.key?.remoteJid || '');
-  const t = Number(m.messageTimestamp || 0) * 1000;
-  const time = t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-  return `${sender} (${time}): ${String(text).slice(0, 200)}`;
+function formatMessageForContext(m: WAMessage): Promise<string | null> {
+  return (async () => {
+    const { text, type } = await messageText(m);
+    if (type === 'stub' || type === 'unknown' || !text) return null;
+    if (m.key?.id?.startsWith('3A')) return null;
+    const sender = m.key?.fromMe ? 'Me' : displayNameFor(m.key?.participant || m.key?.remoteJid || '');
+    const t = Number(m.messageTimestamp || 0) * 1000;
+    const time = t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    return `${sender} (${time}): ${String(text).slice(0, 200)}`;
+  })();
 }
 
 async function downloadMessageMedia(msg: WAMessage, ctx: any): Promise<{ ok: boolean; path?: string; mimeType?: string; fileName?: string; sizeBytes?: number; error?: string }> {
   try {
+    const { getContentType, downloadMediaMessage } = await getBaileys();
     const content = msg.message ? getContentType(msg.message) : null;
     const mediaContent = content?.endsWith('Message') ? (msg.message as any)[content] : null;
     if (!mediaContent?.mimetype) return { ok: false, error: 'Message has no downloadable media.' };
@@ -1189,7 +1198,7 @@ export async function handleResolveWhatsAppContact(args: { query?: string }, ctx
   } catch (err: any) {
     return { ok: false, error: err.message };
   }
-  const r = resolveContact(args?.query || '');
+  const r = await resolveContact(args?.query || '');
   ctx?.broadcast?.({ type: 'workspaceOutput', tool: 'whatsapp', action: 'resolve_contact', query: args?.query, status: r.ok ? 'ok' : 'error' });
   return r;
 }
@@ -1202,7 +1211,7 @@ export async function handleRequestWhatsAppSend(
     requireSock();
     const recipient = args?.recipient || '';
     if (!recipient) return { ok: false, error: 'recipient is required (name, number, or JID).' };
-    const r = resolveContact(recipient);
+    const r = await resolveContact(recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     const purpose = `${args?.action || 'send'}${args?.message ? `: ${String(args.message).slice(0, 80)}` : ''}`;
     const gate = await authorizeSend(r.jid, purpose);
@@ -1224,7 +1233,7 @@ export async function handleSendWhatsAppText(args: { recipient?: string; text?: 
   try {
     const s = requireSock();
     if (!args?.recipient || !args?.text?.trim()) return { ok: false, error: 'recipient and text are required.' };
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     return await withApproval(ctx, r.jid, 'send_text', async () => {
       await s.sendMessage(r.jid as any, { text: String(args.text) } as AnyMessageContent);
@@ -1240,9 +1249,10 @@ export async function handleSendWhatsAppMessage(args: { recipient?: string; mess
     const s = requireSock();
     const text = args?.message || '';
     if (!args?.recipient || !text.trim()) return { ok: false, error: 'recipient and message are required.' };
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     return await withApproval(ctx, r.jid, 'send_message', async () => {
+      const { getContentType } = await getBaileys();
       const content: any = { text: String(text) };
       if (args.quoteMessageId) {
         const quoted = findMessage(r.jid as string, String(args.quoteMessageId));
@@ -1300,7 +1310,7 @@ export async function handleSendWhatsAppContactCard(args: { recipient?: string; 
     if (!args?.recipient || !args?.name || !args?.phone) {
       return { ok: false, error: 'recipient, name, and phone are required.' };
     }
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${args.name}\nTEL;type=CELL;type=VOICE;waid=${args.phone.replace(/\D/g, '')}:+${args.phone.replace(/\D/g, '')}\nEND:VCARD`;
     return await withApproval(ctx, r.jid, 'send_contact_card', async () => {
@@ -1380,9 +1390,9 @@ export async function handleGetWhatsAppMessageHistory(args: { chatId?: string; l
     if (!chatId) return { ok: false, error: 'chatId is required (use a jid from read_whatsapp_chats).' };
     const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
     const list = (waStore.messages.get(chatId) || []).slice(-limit);
-    const messages = list
-      .map((m) => {
-        const { text, type, meta } = messageText(m);
+    const messages = (await Promise.all(list
+      .map(async (m) => {
+        const { text, type, meta } = await messageText(m);
         return {
           id: m.key?.id,
           fromMe: !!m.key?.fromMe,
@@ -1391,7 +1401,7 @@ export async function handleGetWhatsAppMessageHistory(args: { chatId?: string; l
           type,
           text,
         };
-      })
+      })))
       .reverse();
     ctx?.broadcast?.({ type: 'workspaceOutput', tool: 'whatsapp', action: 'get_whatsapp_message_history', status: 'ok' });
     return { ok: true, chatId, chatName: displayNameFor(chatId), messages };
@@ -1424,7 +1434,7 @@ export async function handleBlockWhatsAppContact(args: { recipient?: string }, c
   try {
     const s = requireSock();
     if (!args?.recipient) return { ok: false, error: 'recipient is required.' };
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     await s.updateBlockStatus(r.jid as any, 'block');
     ctx?.broadcast?.({ type: 'workspaceOutput', tool: 'whatsapp', action: 'block_whatsapp_contact', status: 'ok' });
@@ -1438,7 +1448,7 @@ export async function handleUnblockWhatsAppContact(args: { recipient?: string },
   try {
     const s = requireSock();
     if (!args?.recipient) return { ok: false, error: 'recipient is required.' };
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     await s.updateBlockStatus(r.jid as any, 'unblock');
     ctx?.broadcast?.({ type: 'workspaceOutput', tool: 'whatsapp', action: 'unblock_whatsapp_contact', status: 'ok' });
@@ -1470,6 +1480,7 @@ export async function handleTranscribeWhatsAppAudio(args: { messageId?: string; 
     if (loc.error) return { ok: false, error: loc.error };
     const msg = findMessage(loc.chatJid!, loc.messageId!);
     if (!msg) return { ok: false, error: `Message ${loc.messageId} not found in stored history.` };
+    const { getContentType, downloadMediaMessage } = await getBaileys();
     const content = msg.message ? getContentType(msg.message) : null;
     const audioContent = content === 'audioMessage' ? (msg.message as any).audioMessage : null;
     if (!audioContent) return { ok: false, error: 'Message is not a voice note or audio.' };
@@ -1506,7 +1517,7 @@ export async function handleSendWhatsAppDocument(
     const s = requireSock();
     if (!args?.recipient) return { ok: false, error: 'recipient is required.' };
     if (!args.filePath && !args.base64) return { ok: false, error: 'Provide filePath (server file) or base64 + fileName.' };
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     if (!r.ok || !r.jid) return { ok: false, error: r.error };
     let buffer: Buffer;
     let fileName = args.fileName || 'document';
@@ -1553,7 +1564,7 @@ export async function handleWhatsAppCall(args: { recipient?: string }, _ctx: any
   try {
     requireSock();
     if (!args?.recipient) return { ok: false, error: 'recipient is required.' };
-    const r = resolveContact(args.recipient);
+    const r = await resolveContact(args.recipient);
     return {
       ok: false,
       supported: false,
@@ -1569,7 +1580,7 @@ export async function handleWhatsAppCall(args: { recipient?: string }, _ctx: any
 // Dynamic context injection for the Live instruction
 // ---------------------------------------------------------------------------
 
-export function getWhatsAppRecentContext(maxMessages: number = MAX_CONTEXT_MESSAGES): string {
+export async function getWhatsAppRecentContext(maxMessages: number = MAX_CONTEXT_MESSAGES): Promise<string> {
   if (connectionState !== 'connected' || waStore.chats.size === 0) return '';
   const chats = [...waStore.chats.values()].sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
   const lines: string[] = [];
@@ -1580,7 +1591,7 @@ export function getWhatsAppRecentContext(maxMessages: number = MAX_CONTEXT_MESSA
     for (const m of list) {
       if (remaining <= 0) break;
       if (!m.key?.fromMe && m.key?.remoteJid !== chat.jid) continue;
-      const line = formatMessageForContext(m);
+      const line = await formatMessageForContext(m);
       if (line) {
         lines.push(`[${chat.name || displayNameFor(chat.jid)}] ${line}`);
         remaining -= 1;
@@ -1645,7 +1656,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         const hits: any[] = [];
         for (const [jid, list] of waStore.messages) {
           for (const m of list) {
-            const { text } = messageText(m);
+            const { text } = await messageText(m);
             if (text && text.toLowerCase().includes(q)) {
               hits.push({ chatId: jid, chatName: displayNameFor(jid), id: m.key?.id, fromMe: !!m.key?.fromMe, timestamp: m.messageTimestamp ? Number(m.messageTimestamp) * 1000 : null, text: text.slice(0, 160) });
             }
@@ -1664,7 +1675,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       case 'get_profile_status': {
         const jids = [String(args?.recipient || args?.jid || '')];
         if (!jids[0]) return { ok: false, error: 'recipient is required.' };
-        const r = resolveContact(jids[0]);
+        const r = await resolveContact(jids[0]);
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         const res = await s.fetchStatus(r.jid as any);
         const status = Array.isArray(res) ? res[0] : res;
@@ -1673,13 +1684,13 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       case 'get_avatar': {
         const jids = [String(args?.recipient || args?.jid || '')];
         if (!jids[0]) return { ok: false, error: 'recipient is required.' };
-        const r = resolveContact(jids[0]);
+        const r = await resolveContact(jids[0]);
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         const url = await s.profilePictureUrl(r.jid as any, 'image');
         return { ok: true, jid: r.jid, name: r.name, avatarUrl: url || null };
       }
       case 'get_business_profile': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         const bp = await s.getBusinessProfile(r.jid as any);
         return { ok: true, jid: r.jid, profile: bp || null };
@@ -1691,7 +1702,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       case 'send_audio':
       case 'send_sticker': {
         const kind = action.replace('send_', '');
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         let buffer: Buffer;
         if (args?.filePath) {
@@ -1716,7 +1727,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       case 'send_contact_card':
         return await handleSendWhatsAppContactCard({ recipient: args?.recipient, name: args?.name, phone: args?.phone }, ctx);
       case 'send_location': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         if (args?.lat == null || args?.lng == null) return { ok: false, error: 'lat and lng are required.' };
         return await withApproval(ctx, r.jid, 'send_location', async () => {
@@ -1732,7 +1743,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         });
       }
       case 'send_poll': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         if (!args?.name || !Array.isArray(args?.values) || args.values.length === 0) {
           return { ok: false, error: 'name and values (array) are required.' };
@@ -1745,7 +1756,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         });
       }
       case 'send_reaction': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         const msg = args?.messageId ? findMessage(r.jid, String(args.messageId)) : null;
         if (!msg?.key) return { ok: false, error: 'messageId is required to react.' };
@@ -1755,12 +1766,13 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         });
       }
       case 'reply_message': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         const msg = args?.messageId ? findMessage(r.jid, String(args.messageId)) : null;
         if (!msg?.message) return { ok: false, error: 'messageId is required to reply.' };
-        const quotedType = getContentType(msg.message);
         return await withApproval(ctx, r.jid, 'reply_message', async () => {
+          const { getContentType } = await getBaileys();
+          const quotedType = getContentType(msg.message);
           await s.sendMessage(r.jid as any, {
             text: String(args?.text || ''),
             contextInfo: {
@@ -1774,7 +1786,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         });
       }
       case 'forward_message': {
-        const to = resolveContact(String(args?.to || ''));
+        const to = await resolveContact(String(args?.to || ''));
         if (!to.ok || !to.jid) return { ok: false, error: to.error || 'to is required.' };
         const from = args?.fromChatId ? String(args.fromChatId) : (args?.messageId ? findMessageChat(String(args.messageId)) : null);
         const msg = from ? findMessage(from, String(args?.messageId || '')) : null;
@@ -1785,18 +1797,19 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         });
       }
       case 'send_presence_typing': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         await s.sendPresenceUpdate('composing', r.jid as any);
         return { ok: true, typing: true };
       }
       case 'send_buttons': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         if (!args?.text || !Array.isArray(args?.buttons) || args.buttons.length === 0) {
           return { ok: false, error: 'text and buttons (array of labels) are required.' };
         }
         return await withApproval(ctx, r.jid, 'send_buttons', async () => {
+          const { proto } = await getBaileys();
           const buttonsMessage = proto.Message.ButtonsMessage.create({
             text: String(args.text),
             buttons: args.buttons.map((b: string, i: number) => ({
@@ -1813,12 +1826,13 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
         });
       }
       case 'send_template': {
-        const r = resolveContact(String(args?.recipient || ''));
+        const r = await resolveContact(String(args?.recipient || ''));
         if (!r.ok || !r.jid) return { ok: false, error: r.error };
         if (!args?.text || !Array.isArray(args?.buttons) || args.buttons.length === 0) {
           return { ok: false, error: 'text and buttons (array of labels) are required.' };
         }
         return await withApproval(ctx, r.jid, 'send_template', async () => {
+          const { proto } = await getBaileys();
           const templateMessage = proto.Message.TemplateMessage.create({
             hydratedTemplate: {
               hydratedContentText: String(args.text),
@@ -1925,7 +1939,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       }
       case 'create_group': {
         const subject = String(args?.subject || '');
-        const participants = (args?.participants || []).map((p: string) => resolveContact(p).jid).filter(Boolean);
+        const participants = (await Promise.all((args?.participants || []).map(async (p: string) => (await resolveContact(p)).jid))).filter(Boolean);
         if (!subject) return { ok: false, error: 'subject is required.' };
         if (participants.length === 0) return { ok: false, error: 'At least one participant is required.' };
         const meta = await s.groupCreate(subject, participants as any);
@@ -1937,7 +1951,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       case 'demote_participant': {
         const gid = String(args?.group || '');
         if (!gid) return { ok: false, error: 'group is required.' };
-        const participants = (args?.participants || [args?.participant]).map((p: string) => resolveContact(p).jid).filter(Boolean);
+        const participants = (await Promise.all((args?.participants || [args?.participant]).map(async (p: string) => (await resolveContact(p)).jid))).filter(Boolean);
         if (participants.length === 0) return { ok: false, error: 'participant(s) are required.' };
         const actionMap: any = {
           add_participant: 'add',
@@ -2019,6 +2033,7 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       case 'set_profile_picture': {
         if (!args?.filePath && !args?.base64) return { ok: false, error: 'filePath or base64 is required.' };
         const buffer = args.filePath ? fs.readFileSync(path.resolve(String(args.filePath))) : Buffer.from(String(args.base64), 'base64');
+        const { jidNormalizedUser } = await getBaileys();
         await s.updateProfilePicture(jidNormalizedUser(s.user?.id || ''), buffer);
         return { ok: true };
       }

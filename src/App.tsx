@@ -30,6 +30,7 @@ import { ContextWindowHUD } from './components/ContextWindowHUD';
 import { MemoryInspectorModal } from './components/MemoryInspectorModal';
 import { VadControlWidget } from './components/VadControlWidget';
 import { WhatsAppApprovalModal, WhatsAppApprovalState, WhatsAppPanelState } from './components/WhatsAppPanel';
+import { TasksPage } from './components/TasksPage';
 import { useAuth } from './context/AuthContext';
 import { AuthPage } from './components/AuthPage';
 import { db, auth } from './lib/firebase';
@@ -67,6 +68,7 @@ import {
   User as UserIcon,
   Brain,
   Volume2,
+  ListChecks,
 } from 'lucide-react';
 
 export default function App() {
@@ -93,6 +95,7 @@ export default function App() {
 
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isTasksOpen, setIsTasksOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
   const [showIntro, setShowIntro] = useState<boolean>(true);
   const [showIntroSkip, setShowIntroSkip] = useState<boolean>(false);
@@ -602,7 +605,14 @@ export default function App() {
               const idx = prev.findIndex((r) => r.id === msg.runId);
               if (idx > -1) {
                 const updated = [...prev];
-                updated[idx] = { ...updated[idx], output: updated[idx].output + msg.chunk, stream: msg.chunk, done: msg.done, error: msg.error };
+                updated[idx] = {
+                  ...updated[idx],
+                  output: updated[idx].output + msg.chunk,
+                  stream: msg.chunk,
+                  done: msg.done,
+                  error: msg.error,
+                  previewUrl: msg.previewUrl || updated[idx].previewUrl,
+                };
                 return updated;
               }
               return [
@@ -614,6 +624,7 @@ export default function App() {
                   stream: msg.chunk,
                   done: msg.done,
                   error: msg.error,
+                  previewUrl: msg.previewUrl,
                   timestamp: Date.now(),
                 },
                 ...prev,
@@ -649,14 +660,24 @@ export default function App() {
           case 'browserUpdate': {
             setBrowserSessions((prev) => {
               const idx = prev.findIndex((s) => s.id === msg.sessionId);
-              const entry = idx > -1 ? prev[idx] : { id: msg.sessionId, log: [], timestamp: Date.now() };
+              const entry = idx > -1 ? prev[idx] : { id: msg.sessionId, log: [], events: [], timestamp: Date.now() };
+              const eventData: Record<string, unknown> = { ...msg };
+              delete eventData.type;
+              delete eventData.sessionId;
+              delete eventData.event;
+              delete eventData.done;
+              delete eventData.timestamp;
+              delete eventData.screenshot;
               const updatedEntry: BrowserStreamSession = {
                 ...entry,
                 id: msg.sessionId,
                 url: (msg.url as string) || entry.url,
                 title: (msg.title as string) || entry.title,
                 lastScreenshot: (msg.screenshot as string) || entry.lastScreenshot,
-                log: msg.event ? [...entry.log, `[${msg.event}] ${JSON.stringify(msg)}`] : entry.log,
+                log: msg.event ? [...entry.log, `[${msg.event}] ${JSON.stringify(eventData)}`].slice(-120) : entry.log,
+                events: msg.event
+                  ? [...entry.events, { event: msg.event, data: eventData, timestamp: Date.now(), done: msg.done }].slice(-200)
+                  : entry.events,
                 timestamp: Date.now(),
               };
               if (idx > -1) {
@@ -672,12 +693,26 @@ export default function App() {
           case 'computerUpdate': {
             setComputerSessions((prev) => {
               const idx = prev.findIndex((s) => s.id === msg.sessionId);
-              const entry = idx > -1 ? prev[idx] : { id: msg.sessionId, cwd: '/', log: [], timestamp: Date.now() };
+              const entry = idx > -1 ? prev[idx] : { id: msg.sessionId, cwd: '/', log: [], events: [], timestamp: Date.now() };
+              const eventData: Record<string, unknown> = { ...msg };
+              delete eventData.type;
+              delete eventData.sessionId;
+              delete eventData.event;
+              delete eventData.done;
+              delete eventData.timestamp;
+              delete eventData.screenshot;
+              const apps = Array.isArray(msg.apps) ? (msg.apps as string[]) : entry.apps;
               const updatedEntry: ComputerStreamSession = {
                 ...entry,
                 id: msg.sessionId,
                 cwd: (msg.cwd as string) || entry.cwd,
-                log: msg.event ? [...entry.log, `[${msg.event}] ${JSON.stringify(msg)}`] : entry.log,
+                screenshot: (msg.screenshot as string) || entry.screenshot,
+                screenshotMime: (msg.screenshotMime as string) || entry.screenshotMime,
+                apps,
+                log: msg.event ? [...entry.log, `[${msg.event}] ${JSON.stringify(eventData)}`].slice(-120) : entry.log,
+                events: msg.event
+                  ? [...entry.events, { event: msg.event, data: eventData, timestamp: Date.now(), done: msg.done }].slice(-200)
+                  : entry.events,
                 timestamp: Date.now(),
               };
               if (idx > -1) {
@@ -705,18 +740,30 @@ export default function App() {
           case 'codingAgentStream': {
             setCodingAgentSessions((prev) => {
               const idx = prev.findIndex((s) => s.id === msg.sessionId);
-              if (idx > -1) {
-                const updated = [...prev];
-                updated[idx] = {
-                  ...updated[idx],
-                  output: updated[idx].output + (msg.chunk || ''),
-                  log: msg.chunk ? [...updated[idx].log, msg.chunk.trim()] : updated[idx].log,
-                  status: msg.done ? (msg.error ? 'failed' : 'completed') : updated[idx].status,
-                  error: msg.error || updated[idx].error,
-                };
-                return updated;
+              if (idx === -1) {
+                return [
+                  {
+                    id: msg.sessionId,
+                    task: 'Coding Agent session',
+                    cwd: '',
+                    status: msg.done ? (msg.error ? 'failed' : 'completed') : 'running',
+                    log: msg.chunk ? [msg.chunk.trim()] : [],
+                    output: msg.chunk || '',
+                    error: msg.error,
+                    timestamp: Date.now(),
+                  },
+                  ...prev,
+                ];
               }
-              return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                output: updated[idx].output + (msg.chunk || ''),
+                log: msg.chunk ? [...updated[idx].log, msg.chunk.trim()] : updated[idx].log,
+                status: msg.done ? (msg.error ? 'failed' : 'completed') : updated[idx].status,
+                error: msg.error || updated[idx].error,
+              };
+              return updated;
             });
             break;
           }
@@ -1437,6 +1484,17 @@ export default function App() {
             <button
               onClick={() => {
                 triggerHaptic(10);
+                setIsTasksOpen(true);
+              }}
+              className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-white/15 cursor-pointer"
+              aria-label="Active Tasks"
+              title="View Active Tasks"
+            >
+              <ListChecks className="w-5 h-5" strokeWidth={2.5} />
+            </button>
+            <button
+              onClick={() => {
+                triggerHaptic(10);
                 setIsSettingsOpen(true);
               }}
               className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-white/15 cursor-pointer"
@@ -1709,6 +1767,24 @@ export default function App() {
       {!showIntro && !gatePassed && <AuthPage onSkip={() => setSkipAuth(true)} />}
 
       {/* Tasks/Processes Page - shows ongoing automation processes */}
+      {isTasksOpen && (
+        <TasksPage
+          onClose={() => setIsTasksOpen(false)}
+          agentTasks={agentTasks}
+          codingAgentSessions={codingAgentSessions}
+          videoTasks={videoTasks}
+          qwenTasks={qwenTasks}
+          sandboxRuns={sandboxRuns}
+          cliRuns={cliRuns}
+          browserSessions={browserSessions}
+          computerSessions={computerSessions}
+          onRunSandbox={handleRunSandbox}
+          onRunSandboxStream={handleRunSandboxStream}
+          onRunCli={handleRunCli}
+          onRunCliStream={handleRunCliStream}
+          onCancelCodingAgent={handleCancelCodingAgent}
+        />
+      )}
 
       {/* Autoplay Intro Video Overlay */}
       {showIntro && (

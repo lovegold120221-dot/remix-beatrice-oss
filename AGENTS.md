@@ -14,6 +14,7 @@ Always run `npm run lint` for verification. No test script or tests exist.
 
 ## Environment
 - `GEMINI_API_KEY` (must be real key, not `MY_GEMINI_API_KEY`) — checked at runtime in server.ts; required for Live API and some tools.
+- `DASHSCOPE_API_KEY` — required for all `qwen*` (QwenCloud), `generateVideo`, and DashScope-based tools (checked in server/tools.ts); not in `.env.example`, add it to `.env.local`.
 - dotenv loads `.env` then `.env.local` (override) early in server.ts. Use `.env.local` for local `GEMINI_API_KEY` (gitignored).
 - `PORT` (default 5555) and `APP_URL` (e.g. http://168.231.78.113:5555 or https://oss.eburon.ai) are read from env for server binding and public references.
 - `DISABLE_HMR=true` — disables Vite HMR and watch (AI Studio default to avoid flicker on edits).
@@ -25,7 +26,7 @@ Always run `npm run lint` for verification. No test script or tests exist.
 - Single package (no monorepo workspaces).
 - `server.ts` (root) — full server: Express routes, WS `/live`, Gemini Live session (`gemini-3.1-flash-live-preview`), Vite middleware in dev.
 - `src/main.tsx` — React 19 entry (`<AuthProvider><App /></AuthProvider>`).
-- `server/tools.ts` — executeCodeSandbox, runCliCommand, deployAgentTask, runCodingAgent (spawns OpenCode CLI), updateCanvasVisual, getWeather, webSearch, getSystemInfo, QwenCloud (chat/image/video/TTS), video generation (DashScope wan2.7-t2v), browser automation, computer control.
+- `server/tools.ts` — executeCodeSandbox, runCliCommand, deployAgentTask, runCodingAgent (spawns OpenCode CLI), updateCanvasVisual, getWeather, webSearch, getSystemInfo, QwenCloud (chat/image/video/TTS), video generation (fallback chain: happyhorse-1.1-t2v → wan3.0-video → wan2.7-t2v → wan2.6-t2v), browser automation, computer control.
 - `server/googleWorkspace.ts` — all Gmail/Calendar/Drive/Forms/Tasks/Contacts/Meet/YouTube handlers.
 - `server/whatsapp-tools.ts` — WhatsApp integration via Baileys (pairing, messaging, contacts, groups, calls, media).
 - `server/toolProxy.ts` — WebSocket proxy to internal services on ports 5556-5560.
@@ -65,5 +66,10 @@ Always run `npm run lint` for verification. No test script or tests exist.
   - Alternative: Nginx + certbot (see nginx-oss.conf).
 - Set `APP_URL=https://oss.eburon.ai` and `PORT=5555`.
 - Proxy must forward `X-Forwarded-Proto` and `Upgrade`/`Connection` headers for WebSocket.
+
+## Internal Docs (prefer over README)
+- `APP_LOGIC.md` — runtime topology traced from server.ts/tools.ts (client ↔ WS ↔ tool services).
+- `DEPLOYMENT.md` — full deployment guide, env var table, prerequisites.
+- `MEDIA_GENERATION.md` — non-negotiable rule: media-generation tools (`qwenImageGenerate`, `qwenVideoGenerate`, `generateVideo`, TTS) may only run when the user **explicitly** asks; ambiguous requests must be declined with a clarifying question. When editing tool descriptions in server.ts, keep them consistent with this doc's decision tree.
 
 See `server.ts` (and its imports) and `vite.config.ts` for execution flow. Prefer these over README when they differ.

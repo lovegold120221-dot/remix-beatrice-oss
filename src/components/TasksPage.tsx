@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { X, CheckCircle, Clock, Loader2 } from 'lucide-react';
-import { CodeSandboxRun, CliCommandRun, AgentTask, VideoGenerationTask, QwenCloudTask } from '../types';
-import { useAuth } from '../context/AuthContext';
+import React, { useMemo, useState } from 'react';
+import { X, Loader2, Monitor } from 'lucide-react';
+import { AgentTask, BrowserStreamSession, CliCommandRun, CodeSandboxRun, CodingAgentSession, ComputerStreamSession, VideoGenerationTask, QwenCloudTask } from '../types';
+import { ExecutionViewport } from './ExecutionViewport';
 
 interface TaskStatusInfo {
   id: string;
@@ -13,66 +13,145 @@ interface TaskStatusInfo {
   result?: string;
   error?: string;
   timestamp: number;
-  autoCancelAfter?: number;
 }
 
 interface TasksPageProps {
   onClose: () => void;
+  agentTasks: AgentTask[];
+  codingAgentSessions: CodingAgentSession[];
+  videoTasks: VideoGenerationTask[];
+  qwenTasks: QwenCloudTask[];
+  sandboxRuns: CodeSandboxRun[];
+  cliRuns: CliCommandRun[];
+  browserSessions: BrowserStreamSession[];
+  computerSessions: ComputerStreamSession[];
+  onRunSandbox?: (code: string, language: string) => void;
+  onRunSandboxStream?: (code: string, language: string) => void;
+  onRunCli?: (command: string) => void;
+  onRunCliStream?: (command: string, cwd?: string) => void;
+  onCancelCodingAgent?: (sessionId: string) => void;
 }
 
-export const TasksPage: React.FC<TasksPageProps> = ({ onClose }) => {
-  const { user } = useAuth();
+const AGENT_STATUS: Record<string, TaskStatusInfo['status']> = {
+  thinking: 'running',
+  executing: 'running',
+  completed: 'completed',
+  failed: 'failed',
+  idle: 'pending',
+};
 
-  // Task state from the app
-  const [activeTasks, setActiveTasks] = useState<TaskStatusInfo[]>([]);
+const CODING_STATUS: Record<string, TaskStatusInfo['status']> = {
+  starting: 'running',
+  running: 'running',
+  completed: 'completed',
+  failed: 'failed',
+  cancelled: 'cancelled',
+};
+
+const RUNNING_VIDEO_STATUSES = new Set(['pending', 'running', 'submitted', 'processing', 'queued']);
+
+export const TasksPage: React.FC<TasksPageProps> = ({
+  onClose,
+  agentTasks,
+  codingAgentSessions,
+  videoTasks,
+  qwenTasks,
+  sandboxRuns,
+  cliRuns,
+  browserSessions,
+  computerSessions,
+  onRunSandbox,
+  onRunSandboxStream,
+  onRunCli,
+  onRunCliStream,
+  onCancelCodingAgent,
+}) => {
   const [isPageVisible, setIsPageVisible] = useState(true);
+  const [pageTab, setPageTab] = useState<'processes' | 'viewport'>('processes');
 
-  // Auto-update tasks every 3 seconds
-  useEffect(() => {
-    const fetchTasks = async () => {
-      try {
-        // Collect all active tasks from the app state
-        const tasks: TaskStatusInfo[] = [];
+  const activeTasks = useMemo<TaskStatusInfo[]>(() => {
+    const tasks: TaskStatusInfo[] = [];
 
-        // Video generation tasks
-        // @ts-ignore - videoTasks is available in App scope
-        // We'll read from the global state through a different mechanism
+    for (const agent of agentTasks) {
+      if (agent.status === 'idle') continue;
+      tasks.push({
+        id: agent.id,
+        title: `Sub-Agent · ${agent.agentName}`,
+        kind: 'agent',
+        status: AGENT_STATUS[agent.status] || 'pending',
+        progress: agent.progress,
+        prompt: agent.task,
+        result: agent.result,
+        timestamp: agent.timestamp,
+      });
+    }
 
-        // For now, we'll use the local state that gets updated via WebSocket
-        // In a full implementation, this would read from the WebSocket store
-        // or Firebase, but for now we use the tasks already in component state
+    for (const s of codingAgentSessions) {
+      tasks.push({
+        id: s.id,
+        title: 'Coding Agent',
+        kind: 'agent',
+        status: CODING_STATUS[s.status] || 'pending',
+        progress: s.status === 'completed' || s.status === 'failed' || s.status === 'cancelled' ? 100 : 30,
+        prompt: s.task,
+        result: s.output || s.log.slice(-20).join('\n'),
+        error: s.error,
+        timestamp: s.timestamp,
+      });
+    }
 
-        setActiveTasks(tasks.filter((t) => t.status === 'running' || t.status === 'pending'));
-      } catch (err) {
-        console.error('Failed to fetch tasks:', err);
-      }
-    };
+    for (const t of videoTasks) {
+      tasks.push({
+        id: t.id,
+        title: 'Video Generation',
+        kind: 'video',
+        status: t.status === 'completed' ? 'completed' : t.status === 'failed' ? 'failed' : 'running',
+        progress: t.progress,
+        prompt: t.prompt,
+        result: t.videoUrl,
+        error: t.error,
+        timestamp: t.timestamp,
+      });
+    }
 
-    fetchTasks();
-    const interval = setInterval(fetchTasks, 3000);
-    return () => clearInterval(interval);
-  }, []);
+    for (const t of qwenTasks) {
+      const kindMap: Record<string, TaskStatusInfo['kind']> = {
+        image: 'image',
+        imageEdit: 'image',
+        video: 'video',
+        tts: 'tts',
+        chat: 'chat',
+      };
+      const titleMap: Record<string, string> = {
+        image: 'Image Generation',
+        imageEdit: 'Image Edit',
+        video: 'Video Generation',
+        tts: 'Text-to-Speech',
+        chat: 'Qwen Chat',
+      };
+      let status: TaskStatusInfo['status'];
+      if (t.status === 'completed') status = 'completed';
+      else if (t.status === 'failed' || t.status === 'error') status = 'failed';
+      else status = RUNNING_VIDEO_STATUSES.has(t.status) || t.status === 'running' ? 'running' : 'pending';
+      tasks.push({
+        id: t.id,
+        title: titleMap[t.kind] || 'Qwen Cloud Task',
+        kind: kindMap[t.kind] || 'chat',
+        status,
+        progress: t.progress,
+        prompt: t.prompt,
+        result: t.result || (t.urls && t.urls[0]) || t.audioUrl,
+        error: t.error,
+        timestamp: t.timestamp,
+      });
+    }
 
-  // Handle task cancellation
-  const handleCancelTask = useCallback((taskId: string) => {
-    // In a full implementation, this would send a cancellation signal
-    // to the server/WebSocket to cancel the running task
-    console.log('Cancelling task:', taskId);
-    onClose();
-  }, [onClose]);
+    return tasks.sort((a, b) => b.timestamp - a.timestamp);
+  }, [agentTasks, codingAgentSessions, videoTasks, qwenTasks]);
 
-  // Format task kind to display name
-  const getTaskKindName = (kind: string): string => {
-    const map: Record<string, string> = {
-      'code': 'Code Generation',
-      'cli': 'CLI Command',
-      'agent': 'Coding Agent',
-      'video': 'Video Generation',
-      'image': 'Image Generation',
-      'tts': 'Text-to-Speech',
-      'chat': 'Chat Response',
-    };
-    return map[kind] || 'Task';
+  const handleCancelTask = (taskId: string) => {
+    const session = codingAgentSessions.find((s) => s.id === taskId);
+    if (session) onCancelCodingAgent?.(session.id);
   };
 
   // Format progress color
@@ -88,22 +167,20 @@ export const TasksPage: React.FC<TasksPageProps> = ({ onClose }) => {
 
   return (
     <div
-      className="min-h-screen bg-[#050505] text-white overflow-hidden transition-opacity duration-300"
+      className="fixed inset-0 z-40 min-h-screen bg-[#050505] text-white overflow-hidden transition-opacity duration-300 flex flex-col"
       style={{ opacity: isPageVisible ? 1 : 0 }}
     >
       {/* Sticky Header with Task Title and Close Icon */}
-      <header
-        className="sticky top-0 z-40 bg-[#050505]/90 backdrop-blur-xl border-b border-white/10 px-4 py-3 flex items-center justify-between max-w-[430px] mx-auto"
-      >
+      <header className="shrink-0 bg-[#050505]/90 backdrop-blur-xl border-b border-white/10 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-bold tracking-tight text-white">
-            {activeTasks.length === 1 ? (
-              <span className="text-[1.1rem]">
-                {activeTasks[0].title}
-              </span>
+            {pageTab === 'viewport' ? (
+              <span className="text-[1.1rem]">Live Task Execution</span>
+            ) : activeTasks.length === 1 ? (
+              <span className="text-[1.1rem]">{activeTasks[0].title}</span>
             ) : (
               <span className="text-[1.1rem]">
-                {activeTasks.length} Active Processes
+                {activeTasks.length} Active {activeTasks.length === 1 ? 'Process' : 'Processes'}
               </span>
             )}
           </h1>
@@ -118,7 +195,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({ onClose }) => {
         </div>
 
         {/* Progress indicator for single task */}
-        {activeTasks.length === 1 && activeTasks[0].status === 'running' && (
+        {pageTab === 'processes' && activeTasks.length === 1 && activeTasks[0].status === 'running' && (
           <div className="flex items-center gap-2 text-xs">
             <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />
             <span className="text-[#8e8e93]">
@@ -128,10 +205,56 @@ export const TasksPage: React.FC<TasksPageProps> = ({ onClose }) => {
         )}
       </header>
 
+      {/* Page Tabs: Processes | Live Viewport */}
+      <div className="shrink-0 flex items-center gap-1.5 px-4 py-2 border-b border-white/10 bg-black/40">
+        <button
+          onClick={() => setPageTab('processes')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all cursor-pointer ${
+            pageTab === 'processes'
+              ? 'bg-[#00f2fe]/15 border-[#00f2fe]/40 text-[#00f2fe]'
+              : 'bg-white/5 border-white/10 text-[#8e8e93] hover:text-white'
+          }`}
+        >
+          <Loader2 className="w-3.5 h-3.5" />
+          Processes
+          {hasActiveTasks && (
+            <span className="px-1.5 py-0.5 rounded-full bg-[#00f2fe]/25 text-[9px] font-bold text-[#00f2fe]">
+              {activeTasks.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setPageTab('viewport')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all cursor-pointer ${
+            pageTab === 'viewport'
+              ? 'bg-[#00f2fe]/15 border-[#00f2fe]/40 text-[#00f2fe]'
+              : 'bg-white/5 border-white/10 text-[#8e8e93] hover:text-white'
+          }`}
+        >
+          <Monitor className="w-3.5 h-3.5" />
+          Live Viewport
+          {(browserSessions.length > 0 || computerSessions.length > 0 || sandboxRuns.length > 0 || cliRuns.length > 0) && (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#00f2fe] animate-pulse" />
+          )}
+        </button>
+      </div>
+
       {/* Main Content Area */}
-      <main className="flex-1 min-h-[200px] px-4 pb-6 overflow-y-auto">
-        {hasActiveTasks ? (
-          <div className="space-y-4">
+      <main className="flex-1 min-h-0 overflow-hidden">
+        {pageTab === 'viewport' ? (
+          <ExecutionViewport
+            sandboxRuns={sandboxRuns}
+            cliRuns={cliRuns}
+            browserSessions={browserSessions}
+            computerSessions={computerSessions}
+            onRunSandbox={onRunSandbox}
+            onRunSandboxStream={onRunSandboxStream}
+            onRunCli={onRunCli}
+            onRunCliStream={onRunCliStream}
+            onClose={onClose}
+          />
+        ) : hasActiveTasks ? (
+          <div className="h-full overflow-y-auto px-4 pb-6 space-y-4">
             {activeTasks.map((task) => (
               <div
                 key={task.id}
@@ -195,18 +318,28 @@ export const TasksPage: React.FC<TasksPageProps> = ({ onClose }) => {
                   </p>
                 )}
 
+                {/* Cancel button for running coding agent sessions */}
+                {task.status === 'running' && task.kind === 'agent' && codingAgentSessions.some((s) => s.id === task.id) && (
+                  <button
+                    onClick={() => handleCancelTask(task.id)}
+                    className="mt-2 px-3 py-1 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-[10px] font-semibold hover:bg-rose-500/20 transition-colors cursor-pointer"
+                  >
+                    Cancel Task
+                  </button>
+                )}
+
                 {/* Timestamp */}
                 <p className="text-[10px] text-zinc-500 mt-2">
                   {new Date(task.timestamp).toLocaleTimeString([], {
                     minute: '2-digit',
                     second: '2-digit',
-                  })} ago
+                  })}
                 </p>
               </div>
             ))}
           </div>
         ) : (
-          <div className="min-h-[200px] flex flex-col items-center justify-center text-zinc-500">
+          <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-zinc-500 px-4">
             <Loader2 className="w-12 h-12 mx-auto text-[#8e8e93] mb-4 animate-spin" />
             <p>No active processes</p>
             <p className="text-xs mt-2">All tasks completed or cancelled</p>

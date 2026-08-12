@@ -89,7 +89,7 @@ async function startCodingAgent(sessionId: string, task: string, cwd?: string) {
   try {
     const env = { ...process.env, HOME: process.env.HOME || '/root', PATH: process.env.PATH || '' };
 
-    const proc = spawn(OPENCODE_BIN, [task], {
+    const proc = spawn(OPENCODE_BIN, ['run', task], {
       cwd: workDir,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -155,10 +155,23 @@ function cancelCodingAgent(sessionId: string) {
     session.process.kill('SIGTERM');
     session.process = undefined;
   }
-  session.status = 'cancelled';
+session.status = 'cancelled';
   session.endTime = Date.now();
   appendLog(session, '⏹ Coding Agent cancelled by user');
-  sendChunk(sessionId, '', true);
+  broadcast({
+    type: 'codingAgentUpdate',
+    session: {
+      id: session.id,
+      task: session.task,
+      cwd: session.cwd,
+      status: session.status,
+      log: session.log,
+      output: session.output,
+      error: session.error,
+      timestamp: Date.now(),
+    },
+  });
+  sendChunk(session.id, '', true);
   persistSession(session);
   return true;
 }

@@ -72,19 +72,18 @@ Example call:
 
 Required: `prompt`
 Optional defaults:
-- `model`: `"wan2.7-t2v"` (fallback chain: `wan2.7-t2v` then `wan2.7-t2v-plus`)
-- `resolution`: `"720P"` (valid: `720P`, `1080P`)
-- `ratio`: `"16:9"` (valid: `16:9`, `9:16`, `1:1`, `4:3`, `3:4`)
-- `duration`: `5` (valid: 2–15 seconds)
-- `prompt_extend`: `true`
-- `watermark`: `false`
-- `audio_url`: omitted unless Boss provides an audio track for lip-sync
+- `model`: `"happyhorse-1.1-t2v"` (fallback chain: `happyhorse-1.1-t2v` → `wan3.0-video` → `wan2.7-t2v` → `wan2.6-t2v`)
+- `resolution`: `"720P"` (valid: `480P`, `720P`, `1080P`)
+- `ratio`: `"16:9"` (valid: `16:9`, `9:16`, `1:1`)
+- `duration`: `5` (model-dependent, typically 2–15s)
+- `prompt_extend`: `true` (Wan models)
+- `watermark`: `false` (Wan models)
+- `audio_url`: optional audio URL for lip-sync / audio-driven generation
 
 Example call:
 ```json
 {
   "prompt": "A serene aerial shot of a turquoise ocean meeting a white sand beach at sunrise, gentle waves, cinematic",
-  "model": "wan2.7-t2v",
   "resolution": "720P",
   "ratio": "16:9",
   "duration": 5,
@@ -97,14 +96,14 @@ Example call:
 
 Required: `prompt`
 Optional defaults:
-- `resolution`: `"720P"` (valid: `480P`, `720P`)
-- `ratio`: `"16:9"` (valid: `16:9`, `9:16`, `1:1`)
-- `duration`: `5` (valid: `5`, `10`, `15`)
+- `size`: `"1280*720"` (any `width*height` supported by the model)
+- `duration`: `10`
+- `audio`: `true`
+- `shot_type`: `"multi"` (or `single`)
 - `prompt_extend`: `true`
-- `watermark`: `false`
-- `model` (internal): 720P/480P tries `wan2.7-t2v` then `wan2.7-t2v-plus`; 1080P tries `wan2.7-t2v-plus` then `wan2.7-t2v` (this tool does not expose a `model` parameter to the LLM)
+- Model chain: `happyhorse-1.1-t2v` → `wan3.0-video` → `wan2.7-t2v` → `wan2.6-t2v`
 
-Use this when the Boss wants a quick cinematic clip without premium options like 1080P or lip-sync.
+Use this when the Boss wants a quick cinematic clip. This handler matches the working curl example shape (`wan2.6-t2v`, `size`, `duration`, `audio`, `shot_type`) but now prefers current QwenCloud models first.
 
 ### 5. `qwenTts` — speech synthesis
 
@@ -131,8 +130,8 @@ All QwenCloud media handlers now automatically fall back to the next model in th
 | Tool | Default chain | Override rule |
 |------|---------------|---------------|
 | `qwenImageGenerate` / `qwenImageEdit` | `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried |
-| `qwenVideoGenerate` | `wan2.7-t2v` -> `wan2.7-t2v-plus` | If Boss specifies `model`, only that model is tried |
-| `generateVideo` | 720P/480P: `wan2.7-t2v` then `wan2.7-t2v-plus`; 1080P: `wan2.7-t2v-plus` then `wan2.7-t2v` | No `model` parameter exposed |
+| `qwenVideoGenerate` | `happyhorse-1.1-t2v` -> `wan3.0-video` -> `wan2.7-t2v` -> `wan2.6-t2v` | If Boss specifies `model`, only that model is tried |
+| `generateVideo` | `happyhorse-1.1-t2v` -> `wan3.0-video` -> `wan2.7-t2v` -> `wan2.6-t2v` | No `model` parameter exposed |
 | `qwenTts` | `qwen3-tts-flash` -> `qwen3-tts` | If Boss specifies `model`, only that model is tried |
 
 The `model` field is included in all broadcast updates so the UI and logs show which model actually succeeded.

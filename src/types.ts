@@ -59,6 +59,7 @@ export interface CodeSandboxRun {
   timestamp: number;
   stream?: string;
   done?: boolean;
+  previewUrl?: string;
 }
 
 export interface CliCommandRun {
@@ -94,11 +95,19 @@ export interface CodingAgentSession {
   timestamp: number;
 }
 
+export interface RealtimeEvent {
+  event: string;
+  data: Record<string, unknown>;
+  timestamp: number;
+  done?: boolean;
+}
+
 export interface BrowserStreamSession {
   id: string;
   url?: string;
   title?: string;
   log: string[];
+  events: RealtimeEvent[];
   lastScreenshot?: string;
   timestamp: number;
 }
@@ -134,6 +143,10 @@ export interface ComputerStreamSession {
   id: string;
   cwd: string;
   log: string[];
+  events: RealtimeEvent[];
+  screenshot?: string;
+  screenshotMime?: string;
+  apps?: string[];
   timestamp: number;
 }
 
@@ -206,7 +219,7 @@ export type WsServerMessage =
   | { type: 'canvasUpdate'; canvas: CanvasContent }
   | { type: 'videoGenerationUpdate'; task: VideoGenerationTask }
   | { type: 'qwencloudUpdate'; task: QwenCloudTask }
-  | { type: 'sandboxStream'; runId: string; chunk: string; done: boolean; error?: string }
+  | { type: 'sandboxStream'; runId: string; chunk: string; done: boolean; error?: string; previewUrl?: string }
   | { type: 'cliStream'; sessionId: string; chunk: string; done: boolean; exitCode?: number; error?: string }
   | { type: 'browserUpdate'; sessionId: string; event: string; done: boolean; [key: string]: unknown }
   | { type: 'computerUpdate'; sessionId: string; event: string; done: boolean; [key: string]: unknown }

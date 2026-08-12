@@ -1,10 +1,15 @@
 import express from 'express';
 import http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 
 const execPromise = promisify(exec);
+const execFilePromise = promisify(execFile) as (
+  file: string,
+  args?: readonly string[],
+  options?: { timeout?: number; maxBuffer?: number }
+) => Promise<{ stdout: Buffer; stderr: Buffer }>;
 const PORT = parseInt(process.env.COMPUTER_SERVICE_PORT || '5559', 10);
 
 interface ComputerSession {
@@ -34,6 +39,52 @@ function sendEvent(sessionId: string, event: string, data: Record<string, unknow
   });
 }
 
+// Optional desktop screen capture for the realtime frontend viewport.
+// Tries common capture tools; gracefully no-ops when none are installed
+// (e.g. headless servers) — the frontend then falls back to the action feed.
+let lastCaptureAt = 0;
+const CAPTURE_THROTTLE_MS = 2000;
+
+async function captureScreen(): Promise<{ b64: string; mime: string } | undefined> {
+  const now = Date.now();
+  if (now - lastCaptureAt < CAPTURE_THROTTLE_MS) return undefined;
+  const candidates: Array<{ cmd: string; args: string[]; mime: string }> = [
+    { cmd: 'scrot', args: ['-z', '-o', '-q', '80', '-'], mime: 'image/png' },
+    { cmd: 'import', args: ['-window', 'root', '-quality', '60', 'png:-'], mime: 'image/png' },
+    { cmd: 'maim', args: ['-q', '-u', '-m', '1', '-'], mime: 'image/png' },
+  ];
+  for (const c of candidates) {
+    try {
+      const { stdout } = await execFilePromise(c.cmd, c.args, {
+        timeout: 6000,
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      if (stdout && stdout.length > 128) {
+        lastCaptureAt = now;
+        return { b64: stdout.toString('base64'), mime: c.mime };
+      }
+    } catch {
+      // try the next tool
+    }
+  }
+  return undefined;
+}
+
+function sendEventWithScreenshot(sessionId: string, event: string, data: Record<string, unknown>, done = false) {
+  captureScreen()
+    .then((shot) => {
+      sendEvent(
+        sessionId,
+        event,
+        shot ? { ...data, screenshot: shot.b64, screenshotMime: shot.mime } : data,
+        done
+      );
+    })
+    .catch(() => {
+      sendEvent(sessionId, event, data, done);
+    });
+}
+
 function getSession(id: string): ComputerSession {
   let session = sessions.get(id);
   if (!session) {
@@ -49,11 +100,11 @@ async function runShell(command: string, session: ComputerSession) {
     const { stdout, stderr } = await execPromise(command, { timeout: 15000, cwd: session.cwd });
     const out = stdout + (stderr ? `\n[STDERR]\n${stderr}` : '');
     session.log.push(`$ ${command}\n${out}`);
-    sendEvent(session.id, 'shellOutput', { command, output: out }, true);
+    sendEventWithScreenshot(session.id, 'shellOutput', { command, output: out }, true);
   } catch (err: any) {
     const out = (err.stdout || '') + '\n' + (err.stderr || err.message || 'Execution error');
     session.log.push(`$ ${command}\n${out}`);
-    sendEvent(session.id, 'shellError', { command, output: out, error: err.message }, true);
+    sendEventWithScreenshot(session.id, 'shellError', { command, output: out, error: err.message }, true);
   }
 }
 
@@ -106,25 +157,25 @@ export function startComputerService() {
         } else if (msg.type === 'listApps') {
           const apps = await listApplications();
           session.log.push(`Listed ${apps.length} running applications.`);
-          sendEvent(sessionId, 'appList', { apps });
+          sendEventWithScreenshot(sessionId, 'appList', { apps });
         } else if (msg.type === 'mouseMove') {
           await xdotool(`mousemove ${msg.x} ${msg.y}`);
-          sendEvent(sessionId, 'mouseMove', { x: msg.x, y: msg.y });
+          sendEventWithScreenshot(sessionId, 'mouseMove', { x: msg.x, y: msg.y });
         } else if (msg.type === 'mouseClick') {
           const button = msg.button || '1';
           await xdotool(`click ${button}`);
-          sendEvent(sessionId, 'mouseClick', { button });
+          sendEventWithScreenshot(sessionId, 'mouseClick', { button });
         } else if (msg.type === 'key') {
           await xdotool(`key ${msg.key}`);
-          sendEvent(sessionId, 'keyPress', { key: msg.key });
+          sendEventWithScreenshot(sessionId, 'keyPress', { key: msg.key });
         } else if (msg.type === 'type') {
           const text = String(msg.text).replace(/'/g, "'\\''");
           await xdotool(`type --delay 1 '${text}'`);
-          sendEvent(sessionId, 'typeText', { text: msg.text });
+          sendEventWithScreenshot(sessionId, 'typeText', { text: msg.text });
         } else if (msg.type === 'openApp') {
           const appName = msg.app;
           spawn(appName, { stdio: 'ignore', detached: true });
-          sendEvent(sessionId, 'appOpened', { app: appName });
+          sendEventWithScreenshot(sessionId, 'appOpened', { app: appName });
         } else if (msg.type === 'closeSession') {
           sessions.delete(sessionId);
           sendEvent(sessionId, 'sessionClosed', {}, true);

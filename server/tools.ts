@@ -25,8 +25,9 @@ const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 const DASHSCOPE_BASE = 'https://dashscope-intl.aliyuncs.com/api/v1';
 
 // Fallback model chains. Primary first. Used when a call fails or polling reports failure.
+// Source: https://docs.qwencloud.com/llms.txt (Video generation models)
 const QWEN_IMAGE_MODELS = ['wan2.7-image-pro', 'wan2.7-image'];
-const QWEN_VIDEO_MODELS = ['wan2.7-t2v', 'wan2.7-t2v-plus', 'wan2.7-t2v-i2v']; // i2v only as last resort for t2v
+const QWEN_VIDEO_MODELS = ['happyhorse-1.1-t2v', 'wan3.0-video', 'wan2.7-t2v', 'wan2.6-t2v'];
 const QWEN_TTS_MODELS = ['qwen3-tts-flash', 'qwen3-tts'];
 
 // Generic helper: try each model in the chain until one succeeds or all fail.
@@ -314,6 +315,19 @@ export async function handleDeployAgentTask(
 
   // Step 2: Running analysis via Gemini or heuristic
   let agentAnalysis = '';
+  let agentFailed = false;
+  ctx.broadcast({
+    type: 'agentUpdate',
+    agent: {
+      ...initialAgent,
+      status: 'executing' as const,
+      progress: 45,
+      logs: [
+        ...initialAgent.logs,
+        `[${new Date().toLocaleTimeString()}] Running analysis…`,
+      ],
+    },
+  });
   if (ctx.ai && process.env.GEMINI_API_KEY) {
     try {
       const response = await ctx.ai.models.generateContent({
@@ -322,33 +336,36 @@ export async function handleDeployAgentTask(
       });
       agentAnalysis = response.text || 'Task completed successfully.';
     } catch (err: any) {
+      agentFailed = true;
       agentAnalysis = `Agent execution error: ${err.message}`;
     }
   } else {
     agentAnalysis = `Agent ${agentName} processed task "${task}". Verified environment state and prepared step-by-step resolution.`;
   }
 
-  const completedAgent = {
+  const doneAgent = {
     ...initialAgent,
-    status: 'completed' as const,
+    status: (agentFailed ? 'failed' : 'completed') as 'completed' | 'failed',
     progress: 100,
     logs: [
       ...initialAgent.logs,
-      `[${new Date().toLocaleTimeString()}] Agent reasoning completed.`,
-      `[${new Date().toLocaleTimeString()}] Output verified and attached to Beatrice state.`
+      `[${new Date().toLocaleTimeString()}] Agent reasoning ${agentFailed ? 'failed' : 'completed'}.`,
+      agentFailed
+        ? `[${new Date().toLocaleTimeString()}] Output not attached to Beatrice state.`
+        : `[${new Date().toLocaleTimeString()}] Output verified and attached to Beatrice state.`
     ],
     result: agentAnalysis,
   };
 
   ctx.broadcast({
     type: 'agentUpdate',
-    agent: completedAgent,
+    agent: doneAgent,
   });
 
   return {
     agentId,
     agentName,
-    status: 'completed',
+    status: agentFailed ? 'failed' : 'completed',
     result: agentAnalysis,
   };
 }
@@ -511,11 +528,11 @@ export async function handleRunComputerControl(
 export async function handleGenerateVideo(
   args: {
     prompt: string;
-    resolution?: string;
-    ratio?: string;
+    size?: string;
     duration?: number;
+    audio?: boolean;
+    shot_type?: string;
     prompt_extend?: boolean;
-    watermark?: boolean;
   },
   ctx: ToolContext
 ) {
@@ -525,21 +542,21 @@ export async function handleGenerateVideo(
   }
 
   const taskId = `vid_${Date.now()}`;
-  // Shuffle model fallback for the simpler DashScope video tool too.
-  const preferredModels = args.resolution === '1080P' ? ['wan2.7-t2v-plus', 'wan2.7-t2v'] : ['wan2.7-t2v', 'wan2.7-t2v-plus'];
+  const preferredModels = ['happyhorse-1.1-t2v', 'wan3.0-video', 'wan2.7-t2v', 'wan2.6-t2v'];
   let lastError = '';
+
   for (const model of preferredModels) {
-    const body = {
+    const body: any = {
       model,
       input: { prompt: args.prompt },
       parameters: {
-        resolution: args.resolution || '720P',
-        ratio: args.ratio || '16:9',
+        size: args.size || '1280*720',
+        duration: args.duration || 10,
         prompt_extend: args.prompt_extend !== false,
-        watermark: args.watermark !== false,
-        duration: args.duration || 15,
       },
     };
+    if (args.audio !== undefined) body.parameters.audio = args.audio;
+    if (args.shot_type) body.parameters.shot_type = args.shot_type;
 
     ctx.broadcast({
       type: 'videoGenerationUpdate',
@@ -571,7 +588,7 @@ export async function handleGenerateVideo(
           type: 'videoGenerationUpdate',
           task: { id: taskId, model, status: 'failed', error: lastError, timestamp: Date.now() },
         });
-        continue; // try next model
+        continue;
       }
 
       const submitData = (await submitRes.json()) as { output?: { task_id?: string; task_status?: string }; request_id?: string };
@@ -933,17 +950,31 @@ export async function handleQwenVideoGenerate(
       async (model) => {
         const input: any = { prompt: args.prompt };
         if (args.audio_url) input.audio_url = args.audio_url;
-        const body = {
+        const body: any = {
           model,
           input,
-          parameters: {
-            resolution: args.resolution || '720P',
-            ratio: args.ratio || '16:9',
-            prompt_extend: args.prompt_extend !== false,
-            watermark: args.watermark ?? false,
-            duration: args.duration || 15,
-          },
+          parameters: {},
         };
+
+        // HappyHorse 1.1 / Wan 2.7 / Wan 2.6 expect resolution + ratio
+        const supportsSize = model.startsWith('wan3.0') || model.startsWith('wan2.6') || model.startsWith('wan2.7');
+        if (supportsSize) {
+          body.parameters.resolution = args.resolution || '720P';
+          body.parameters.ratio = args.ratio || '16:9';
+          body.parameters.prompt_extend = args.prompt_extend !== false;
+          body.parameters.watermark = args.watermark ?? false;
+          body.parameters.duration = args.duration || 5;
+        } else if (model.startsWith('happyhorse')) {
+          // HappyHorse supports aspect ratio + duration
+          body.parameters.aspect_ratio = args.ratio || '16:9';
+          body.parameters.duration = args.duration || 5;
+          body.parameters.audio = args.audio_url ? false : true; // happyhorse has built-in audio unless user supplied audio_url
+        } else {
+          // wan3.0-video all-in-one: supports size/duration/audio/shot_type
+          body.parameters.size = args.resolution ? `${args.resolution}` : '1280*720';
+          body.parameters.duration = args.duration || 5;
+          body.parameters.audio = true;
+        }
 
         const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/video-generation/video-synthesis`, {
           method: 'POST',

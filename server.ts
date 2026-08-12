@@ -294,18 +294,18 @@ function getFunctionDeclarations() {
         {
           name: 'qwenVideoGenerate',
           description:
-            'Generate videos with QwenCloud Wan 2.7 text-to-video. ONLY use if the user explicitly asks to generate or create a video. This signals authorization.',
+            'Generate premium AI videos with QwenCloud. Primary: happyhorse-1.1-t2v (1080P, 3-15s, audio). Server fallback chain: happyhorse-1.1-t2v → wan3.0-video → wan2.7-t2v → wan2.6-t2v. ONLY use if the user explicitly asks to generate or create a video.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               prompt: { type: Type.STRING, description: 'Video description with optional shot timestamps' },
-              model: { type: Type.STRING, description: 'wan2.7-t2v or dated variant' },
-              resolution: { type: Type.STRING, description: '720P or 1080P' },
-              ratio: { type: Type.STRING, description: '16:9, 9:16, 1:1, 4:3, 3:4' },
-              duration: { type: Type.NUMBER, description: '2-15 seconds' },
-              prompt_extend: { type: Type.BOOLEAN, description: 'Auto-extend prompt' },
-              watermark: { type: Type.BOOLEAN, description: 'Add watermark' },
-              audio_url: { type: Type.STRING, description: 'Optional audio URL for lip-sync' },
+              model: { type: Type.STRING, description: 'Optional: happyhorse-1.1-t2v, wan3.0-video, wan2.7-t2v, wan2.6-t2v' },
+              resolution: { type: Type.STRING, description: '480P, 720P or 1080P' },
+              ratio: { type: Type.STRING, description: '16:9, 9:16, or 1:1' },
+              duration: { type: Type.NUMBER, description: 'Duration in seconds (model-dependent, typically 2-15s)' },
+              prompt_extend: { type: Type.BOOLEAN, description: 'Auto-extend prompt (Wan models)' },
+              watermark: { type: Type.BOOLEAN, description: 'Add watermark (Wan models)' },
+              audio_url: { type: Type.STRING, description: 'Optional audio URL for lip-sync / audio-driven generation' },
             },
             required: ['prompt'],
           },
@@ -328,7 +328,7 @@ function getFunctionDeclarations() {
         {
           name: 'generateVideo',
           description:
-            'Generate a short AI video clip from a text prompt using DashScope wan2.7-t2v. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
+            'Generate a short AI video clip from a text prompt using DashScope. Model chain: happyhorse-1.1-t2v → wan3.0-video → wan2.7-t2v → wan2.6-t2v. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -337,25 +337,25 @@ function getFunctionDeclarations() {
                 description:
                   'Detailed text prompt describing the video. Can include multi-shot story beats with timestamps.',
               },
-              resolution: {
+              size: {
                 type: Type.STRING,
-                description: 'Video resolution: 480P or 720P',
-              },
-              ratio: {
-                type: Type.STRING,
-                description: 'Aspect ratio: 16:9, 9:16, or 1:1',
+                description: 'Video size in pixels, e.g. 1280*720',
               },
               duration: {
                 type: Type.NUMBER,
-                description: 'Duration in seconds: 5, 10, or 15',
+                description: 'Duration in seconds, e.g. 5, 10, 15',
+              },
+              audio: {
+                type: Type.BOOLEAN,
+                description: 'Whether to generate audio with the video',
+              },
+              shot_type: {
+                type: Type.STRING,
+                description: 'Shot composition: single or multi',
               },
               prompt_extend: {
                 type: Type.BOOLEAN,
                 description: 'Whether DashScope should auto-extend the prompt for better quality',
-              },
-              watermark: {
-                type: Type.BOOLEAN,
-                description: 'Whether to include a DashScope watermark',
               },
             },
             required: ['prompt'],
@@ -1258,7 +1258,7 @@ async function startServer() {
     }
   }
 
-  function buildSessionInstruction(bootstrap?: {
+  async function buildSessionInstruction(bootstrap?: {
     preferredLanguage?: string;
     voiceName?: string;
     systemInstruction?: string;
@@ -1266,7 +1266,7 @@ async function startServer() {
     recentTurns?: { role: string; text: string; timestamp?: number }[];
     lastInteractionAt?: number;
     userDisplayName?: string;
-  }): string {
+  }): Promise<string> {
     const base = loadGlobalSystemPrompt();
     const lang = (bootstrap?.preferredLanguage || 'auto').trim() || 'auto';
     const lastAt = bootstrap?.lastInteractionAt || 0;
@@ -1313,7 +1313,7 @@ ${summary || recent ? `${summary ? `SUMMARY:\n${summary}\n` : ''}${recent ? `REC
 ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}` : ''}
 `.trim();
 
-    const waContext = getWhatsAppRecentContext();
+    const waContext = await getWhatsAppRecentContext();
     const waBlock = waContext
       ? `\n\n${waContext}\n- If the Boss asks about WhatsApp, you have live context above plus read_whatsapp_chats / get_whatsapp_message_history. Resolve contacts before sending; never invent JIDs.`
       : '';
@@ -1385,7 +1385,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
         }
 
         const voiceName = sessionBootstrap?.voiceName || 'Aoede';
-        const instruction = buildSessionInstruction(sessionBootstrap || undefined);
+        const instruction = await buildSessionInstruction(sessionBootstrap || undefined);
         console.log(`[Live] Starting session (${reason}) lang=${sessionBootstrap?.preferredLanguage || 'auto'} promptChars=${instruction.length}`);
 
         liveSession = await ai.live.connect({
@@ -1862,6 +1862,21 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
           await sendToService('computer', { type: msg.action, sessionId, ...msg.payload }, broadcastToClient);
         } else if (msg.type === 'runCodingAgent') {
           const sessionId = msg.sessionId || `ca_${Date.now()}`;
+          broadcastToClient({
+            type: 'codingAgentUpdate',
+            session: {
+              id: sessionId,
+              task: msg.task,
+              cwd: msg.cwd || process.cwd(),
+              status: 'starting',
+              log: [
+                `[${new Date().toLocaleTimeString()}] Coding Agent initializing...`,
+                `[${new Date().toLocaleTimeString()}] Task: ${msg.task}`,
+              ],
+              output: '',
+              timestamp: Date.now(),
+            },
+          });
           await sendToService('codingAgent', { type: 'runCodingAgent', sessionId, task: msg.task, cwd: msg.cwd }, broadcastToClient);
         } else if (msg.type === 'cancelCodingAgent') {
           await sendToService('codingAgent', { type: 'cancelCodingAgent', sessionId: msg.sessionId }, broadcastToClient);
@@ -1899,6 +1914,25 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
         computer: { port: SERVICE_PORTS.computer, url: `ws://127.0.0.1:${SERVICE_PORTS.computer}/stream` },
       },
     });
+  });
+
+  // Sandbox HTML previews are served by the sandbox service on its internal
+  // port; proxy them through the main server so the frontend iframe works.
+  app.get('/api/sandbox/preview/:file', (req, res) => {
+    const file = String(req.params.file || '').replace(/[^a-zA-Z0-9._-]/g, '');
+    const upstream = `http://127.0.0.1:${SERVICE_PORTS.sandbox}/api/sandbox/preview/${file}`;
+    http
+      .get(upstream, (upRes) => {
+        if (upRes.statusCode && upRes.statusCode >= 400) {
+          res.status(upRes.statusCode).send('Sandbox preview not found');
+          return;
+        }
+        res.setHeader('Content-Type', upRes.headers['content-type'] || 'text/html; charset=utf-8');
+        upRes.pipe(res);
+      })
+      .on('error', () => {
+        res.status(502).send('Sandbox preview server unavailable');
+      });
   });
 
   // Vite middleware for development
