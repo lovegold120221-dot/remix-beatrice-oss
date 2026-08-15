@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { X, Loader2, Monitor } from 'lucide-react';
+import { X, Loader2, Monitor, ListChecks } from 'lucide-react';
 import { AgentTask, BrowserStreamSession, CliCommandRun, CodeSandboxRun, CodingAgentSession, ComputerStreamSession, VideoGenerationTask, QwenCloudTask } from '../types';
 import { ExecutionViewport } from './ExecutionViewport';
 
@@ -176,6 +176,8 @@ export const TasksPage: React.FC<TasksPageProps> = ({
           <h1 className="text-lg font-bold tracking-tight text-white">
             {pageTab === 'viewport' ? (
               <span className="text-[1.1rem]">Live Task Execution</span>
+            ) : activeTasks.length === 0 ? (
+              <span className="text-[1.1rem]">Task History</span>
             ) : activeTasks.length === 1 ? (
               <span className="text-[1.1rem]">{activeTasks[0].title}</span>
             ) : (
@@ -340,9 +342,9 @@ export const TasksPage: React.FC<TasksPageProps> = ({
           </div>
         ) : (
           <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-zinc-500 px-4">
-            <Loader2 className="w-12 h-12 mx-auto text-[#8e8e93] mb-4 animate-spin" />
-            <p>No active processes</p>
-            <p className="text-xs mt-2">All tasks completed or cancelled</p>
+            <ListChecks className="w-12 h-12 mx-auto text-[#8e8e93] mb-4" />
+            <p>No tasks yet</p>
+            <p className="text-xs mt-2">Ask Beatrice to run something and it will appear here</p>
           </div>
         )}
       </main>

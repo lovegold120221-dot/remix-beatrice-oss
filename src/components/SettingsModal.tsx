@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   ChevronRight,
+  ListChecks,
   LogIn,
   LogOut,
   Sliders,
@@ -21,11 +22,13 @@ interface SettingsModalProps {
   vadStatus?: VadStatus;
   onSaveVadConfig?: (newConfig: Partial<VadConfig>) => void;
   onOpenProfile?: () => void;
+  onOpenTasker?: () => void;
   waStatus?: WhatsAppPanelState;
   onPairWhatsApp?: (phone: string) => void;
   onQrPairWhatsApp?: () => void;
   onCancelWhatsAppPairing?: () => void;
   onLogoutWhatsApp?: () => void;
+  onToggleWhatsAppBossMode?: (enabled: boolean) => void;
 }
 
 const Toggle: React.FC<{ on: boolean; onChange: () => void }> = ({ on, onChange }) => (
@@ -100,11 +103,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   vadStatus,
   onSaveVadConfig,
   onOpenProfile,
+  onOpenTasker,
   waStatus,
   onPairWhatsApp,
   onQrPairWhatsApp,
   onCancelWhatsAppPairing,
   onLogoutWhatsApp,
+  onToggleWhatsAppBossMode,
 }) => {
   const { user, signInWithGoogle, logout } = useAuth();
 
@@ -462,6 +467,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {/* Tasker */}
+          <div className="space-y-1.5">
+            <SectionLabel>Tasker</SectionLabel>
+            <div className="rounded-2xl bg-[#121215] border border-white/10 overflow-hidden divide-y divide-white/[0.07]">
+              <GroupRow
+                label="Task History"
+                onClick={onOpenTasker}
+                right={
+                  <span className="flex items-center gap-1.5">
+                    <ListChecks className="w-4 h-4 text-[#00f2fe]" />
+                    <ChevronRight className="w-4 h-4 text-[#8e8e93]" />
+                  </span>
+                }
+              />
+            </div>
+          </div>
+
           {/* Voice & Language */}
           <div className="space-y-1.5">
             <SectionLabel>Voice & Language</SectionLabel>
@@ -511,6 +533,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onQr={onQrPairWhatsApp}
                 onCancel={onCancelWhatsAppPairing || (() => {})}
                 onLogout={onLogoutWhatsApp || (() => {})}
+                onToggleBossMode={onToggleWhatsAppBossMode}
               />
             </div>
           )}

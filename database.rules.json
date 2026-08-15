@@ -53,6 +53,15 @@
         }
       }
     },
+    "google_tokens": {
+      "$userId": {
+        ".read": "auth != null && auth.uid === $userId",
+        ".write": "auth != null && auth.uid === $userId",
+        "accessToken": { ".validate": "newData.isString() && newData.val().length <= 4096" },
+        "updatedAt": { ".validate": "newData.isNumber()" },
+        "email": { ".validate": "newData.isString()" }
+      }
+    },
     "whatsapp_store": {
       ".read": false,
       ".write": false

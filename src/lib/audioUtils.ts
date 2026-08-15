@@ -170,7 +170,15 @@ export class AudioController {
 
       source.connect(this.analyserInput);
       this.analyserInput.connect(this.scriptProcessor);
-      this.scriptProcessor.connect(this.inputAudioCtx.destination);
+      // IMPORTANT: never connect the mic to the speaker destination directly —
+      // that creates a feedback loop where the model's own voice is re-captured
+      // by the mic, triggers false barge-ins and self-interrupts playback
+      // (jumpy/distorted output). A zero-gain sink keeps the audio graph alive
+      // for onaudioprocess without any audible loopback.
+      const silentSink = this.inputAudioCtx.createGain();
+      silentSink.gain.value = 0;
+      this.scriptProcessor.connect(silentSink);
+      silentSink.connect(this.inputAudioCtx.destination);
     } catch (err) {
       console.error('Error starting microphone input:', err);
       throw err;

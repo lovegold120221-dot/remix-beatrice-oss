@@ -40,6 +40,8 @@ let pairingPhone: string | null = null;
 let qrRaw: string | null = null;
 let qrDataUrl: string | null = null;
 let lastError: string | null = null;
+let profile: { name: string | null; phone: string | null; avatarUrl: string | null } | null = null;
+let bossMode = false;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let pairingTimeout: NodeJS.Timeout | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -97,7 +99,7 @@ function ensureDirs() {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-function readMeta(): { connectedOnce?: boolean } {
+function readMeta(): { connectedOnce?: boolean; bossMode?: boolean } {
   try {
     return JSON.parse(fs.readFileSync(META_FILE, 'utf8')) || {};
   } catch {
@@ -105,7 +107,7 @@ function readMeta(): { connectedOnce?: boolean } {
   }
 }
 
-function writeMeta(meta: { connectedOnce?: boolean }) {
+function writeMeta(meta: { connectedOnce?: boolean; bossMode?: boolean }) {
   try {
     fs.writeFileSync(META_FILE, JSON.stringify(meta));
   } catch {
@@ -262,22 +264,31 @@ async function serializeStore() {
       const { text, type, meta } = await messageText(m);
       return {
         key: {
-          id: m.key?.id,
-          remoteJid: m.key?.remoteJid,
+          id: m.key?.id ?? null,
+          remoteJid: m.key?.remoteJid ?? null,
           fromMe: !!m.key?.fromMe,
-          participant: m.key?.participant,
+          participant: m.key?.participant ?? null,
         },
-        messageTimestamp: m.messageTimestamp,
+        messageTimestamp: m.messageTimestamp ?? null,
         pushName: m.pushName || null,
         type,
         text: String(text).slice(0, 400),
-        meta: meta || null,
-        stub: m.messageStubType ? String(m.messageStubType) : undefined,
+        meta: meta ? JSON.parse(JSON.stringify(meta)) : null,
+        stub: m.messageStubType ? String(m.messageStubType) : null,
       };
     }));
-    messages[jid] = recent;
+    // RTDB keys forbid ".", "#", "$", "/", "[", "]" — JIDs contain dots, so encode.
+    messages[encodeRTDBKey(jid)] = recent;
   }
   return { updatedAt: Date.now(), chats, contacts, calls, messages };
+}
+
+function encodeRTDBKey(jid: string): string {
+  return jid.replace(/[.#$\/\[\]]/g, (ch) => `%${ch.charCodeAt(0).toString(16)}`);
+}
+
+function decodeRTDBKey(key: string): string {
+  return key.replace(/%([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 }
 
 async function persistStore() {
@@ -326,7 +337,7 @@ function restoreMessage(d: any): WAMessage | null {
     },
     messageTimestamp: d.messageTimestamp,
     pushName: d.pushName || undefined,
-    messageStubType: d.stub,
+    messageStubType: d.stub || undefined,
     _restoredText: d.text,
     _restoredType: d.type,
     _restoredMeta: d.meta,
@@ -342,7 +353,7 @@ function applyStoreData(d: any) {
   }
   for (const [jid, list] of Object.entries(d.messages || {})) {
     const restored = (list as any[]).map(restoreMessage).filter(Boolean);
-    if (restored.length) waStore.messages.set(jid, restored);
+    if (restored.length) waStore.messages.set(decodeRTDBKey(jid), restored);
   }
   for (const c of d.calls || []) {
     waStore.calls.push(c);
@@ -398,9 +409,64 @@ function setState(state: typeof connectionState, extra?: { error?: string | null
       qrDataUrl: state === 'pairing' ? qrDataUrl : null,
       error: lastError,
       reconnectAttempt: state === 'connecting' ? reconnectAttempt : 0,
+      profile: state === 'connected' ? profile : null,
+      bossMode: state === 'connected' ? bossMode : false,
     });
   } catch {
     // no broadcast hook yet
+  }
+}
+
+export function setBossMode(enabled: boolean): boolean {
+  bossMode = !!enabled;
+  writeMeta({ connectedOnce: readMeta().connectedOnce, bossMode });
+  try {
+    broadcast({
+      type: 'whatsappStatus',
+      status: connectionState,
+      connected: connectionState === 'connected',
+      pairingCode: null,
+      qrDataUrl: null,
+      error: lastError,
+      reconnectAttempt: 0,
+      profile: connectionState === 'connected' ? profile : null,
+      bossMode,
+    });
+  } catch {
+    // no broadcast hook yet
+  }
+  return bossMode;
+}
+
+export function getBossMode(): boolean {
+  return bossMode;
+}
+
+async function fetchProfile(s: WASocket) {
+  try {
+    const me = s.user;
+    if (!me?.id) return;
+    const phone = (me.id.split('@')[0] || '').split(':')[0] || null;
+    let avatarUrl: string | null = null;
+    try {
+      avatarUrl = await s.profilePictureUrl(me.id as any, 'image');
+    } catch {
+      avatarUrl = null;
+    }
+    profile = { name: me.name || null, phone, avatarUrl };
+    broadcast({
+      type: 'whatsappStatus',
+      status: connectionState,
+      connected: connectionState === 'connected',
+      pairingCode: null,
+      qrDataUrl: null,
+      error: lastError,
+      reconnectAttempt: 0,
+      profile,
+      bossMode,
+    });
+  } catch {
+    profile = null;
   }
 }
 
@@ -415,6 +481,8 @@ export function setWhatsAppBroadcaster(fn: (msg: unknown) => void) {
       qrDataUrl,
       error: lastError,
       reconnectAttempt: connectionState === 'connecting' ? reconnectAttempt : 0,
+      profile: connectionState === 'connected' ? profile : null,
+      bossMode: connectionState === 'connected' ? bossMode : false,
     });
   } catch {
     // ignore
@@ -610,10 +678,11 @@ async function connectSocket(): Promise<void> {
         clearTimeout(pairingTimeout);
         pairingTimeout = null;
       }
-      writeMeta({ connectedOnce: true });
+      writeMeta({ connectedOnce: true, bossMode });
       setState('connected');
       schedulePersist();
       startHeartbeat();
+      void fetchProfile(sock);
     } else if (connection === 'close') {
       stopHeartbeat();
       const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
@@ -628,6 +697,7 @@ async function connectSocket(): Promise<void> {
         pairingPhone = null;
         qrRaw = null;
         qrDataUrl = null;
+        profile = null;
         if (pairingTimeout) {
           clearTimeout(pairingTimeout);
           pairingTimeout = null;
@@ -639,6 +709,7 @@ async function connectSocket(): Promise<void> {
       if (loggedOut) {
         sock = null;
         reconnectAttempt = 0;
+        profile = null;
         setState('logged_out', { error: 'WhatsApp session was logged out from the phone.' });
         return;
       }
@@ -680,6 +751,7 @@ async function connectSocket(): Promise<void> {
   sock.ev.on('messages.upsert', ({ messages }: { messages: WAMessage[] }) => {
     for (const m of messages) pushMessage(m);
     void broadcastIncomingMessages(messages);
+    if (bossMode) void maybeAutoReply(messages);
   });
   sock.ev.on('messages.update', (updates: any[]) => {
     for (const u of updates) {
@@ -1167,6 +1239,8 @@ export const WA_INTERNAL_ACTIONS: InternalAction[] = [
   { id: 'sync_contacts', group: 'account', description: 'Request contact list refresh', implemented: true },
   { id: 'request_history_sync', group: 'account', description: 'Request full history sync from the phone', implemented: true },
   // ---- misc
+  { id: 'get_knowledge_base', group: 'misc', description: 'Get the compact WhatsApp knowledge base (contacts, Boss chat style, recent conversations) built from chat history', implemented: true },
+  { id: 'set_boss_mode', group: 'misc', description: 'Enable/disable Boss Mode (auto-reply to incoming WhatsApp messages mimicking the Boss\'s style)', implemented: true },
   { id: 'call_contact', group: 'misc', description: 'Initiate a WhatsApp voice call', implemented: false },
   { id: 'get_privacy_settings', group: 'misc', description: 'Read current privacy settings', implemented: true },
   { id: 'update_privacy_settings', group: 'misc', description: 'Update privacy settings (last seen, profile picture, status, read receipts)', implemented: true },
@@ -1187,6 +1261,8 @@ export function getWhatsAppStatus(): {
   chats: number;
   contacts: number;
   messages: number;
+  bossMode: boolean;
+  profile: { name: string | null; phone: string | null; avatarUrl: string | null } | null;
 } {
   return {
     connected: connectionState === 'connected',
@@ -1198,6 +1274,8 @@ export function getWhatsAppStatus(): {
     chats: waStore.chats.size,
     contacts: waStore.contacts.size,
     messages: [...waStore.messages.values()].reduce((n, l) => n + l.length, 0),
+    bossMode,
+    profile: connectionState === 'connected' ? profile : null,
   };
 }
 
@@ -1613,6 +1691,256 @@ export async function getWhatsAppRecentContext(maxMessages: number = MAX_CONTEXT
   }
   if (lines.length === 0) return '';
   return `### LIVE WHATSAPP CONTEXT (most recent activity, refreshed per session)\n${lines.join('\n')}`;
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp knowledge base + Boss Mode auto-reply
+// ---------------------------------------------------------------------------
+
+let genAi: any = null;
+async function getLocalGemini() {
+  if (genAi) return genAi;
+  const key = process.env.GEMINI_API_KEY;
+  if (!key || key === 'MY_GEMINI_API_KEY') return null;
+  const mod: any = await import('@google/genai');
+  genAi = new mod.GoogleGenAI({ apiKey: key });
+  return genAi;
+}
+
+// Cache the compact knowledge base so repeated calls are cheap; refresh every 5 min.
+let kbCache: { builtAt: number; text: string } | null = null;
+const KB_TTL_MS = 5 * 60 * 1000;
+
+const styleStopwords = new Set([
+  'the','a','an','and','or','but','of','to','in','on','at','for','with','is','are','was',
+  'were','be','been','it','this','that','i','you','he','she','we','they','me','my','your',
+  'have','has','had','do','does','did','not','no','yes','ok','okay','sure','so','just',
+  'u','im','dont','youre','its','theres','ill','ive','that\'s','there','what','when','where',
+  'how','why','can','cant','will','would','should','could','as','by','from','up','out',
+]);
+
+function guessLanguage(samples: string[]): string {
+  const joined = samples.join(' ').toLowerCase();
+  const counts: Record<string, number> = {};
+  for (const c of joined) {
+    const code = c.charCodeAt(0);
+    if (code >= 0x4e00 && code <= 0x9fff) counts.zh = (counts.zh || 0) + 1;
+    else if (code >= 0x3040 && code <= 0x30ff) counts.ja = (counts.ja || 0) + 1;
+    else if (code >= 0xac00 && code <= 0xd7af) counts.ko = (counts.ko || 0) + 1;
+    else if (code >= 0x0400 && code <= 0x04ff) counts.ru = (counts.ru || 0) + 1;
+    else if (code >= 0x0600 && code <= 0x06ff) counts.ar = (counts.ar || 0) + 1;
+    else if (code >= 0x0900 && code <= 0x097f) counts.hi = (counts.hi || 0) + 1;
+    else if (code >= 0x0e00 && code <= 0x0e7f) counts.th = (counts.th || 0) + 1;
+    else if (code >= 0x1f00 && code <= 0x1fff) counts.el = (counts.el || 0) + 1;
+    else if (code >= 0x0370 && code <= 0x03ff) counts.el = (counts.el || 0) + 1;
+  }
+  const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  if (!best || best[1] < 3) return 'English (or romanized)';
+  const names: Record<string, string> = {
+    zh: 'Chinese', ja: 'Japanese', ko: 'Korean', ru: 'Russian', ar: 'Arabic',
+    hi: 'Hindi', th: 'Thai', el: 'Greek',
+  };
+  return names[best[0]] || 'English (or romanized)';
+}
+
+// Build a compact, style-oriented knowledge base from the full in-memory history:
+// who the Boss talks to, how the Boss writes, and the most recent conversations.
+export async function getWhatsAppKnowledgeBase(force = false): Promise<string> {
+  if (connectionState !== 'connected') return '';
+  if (!force && kbCache && Date.now() - kbCache.builtAt < KB_TTL_MS) return kbCache.text;
+
+  const lines: string[] = ['### WHATSAPP KNOWLEDGE BASE (built from the Boss\'s chat history)'];
+
+  if (profile) {
+    lines.push(`- Linked WhatsApp account: ${profile.name || 'unknown'}${profile.phone ? ` (${profile.phone})` : ''}`);
+  }
+
+  // ---- People the Boss talks to (contacts with activity)
+  const chats = [...waStore.chats.values()].sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+  const people: string[] = [];
+  const groups: string[] = [];
+  for (const c of chats.slice(0, 40)) {
+    const isGroup = c.jid.endsWith('@g.us');
+    const msgs = waStore.messages.get(c.jid)?.length || 0;
+    const label = `${c.name || displayNameFor(c.jid)} (${msgs} msgs)`;
+    if (isGroup) groups.push(label);
+    else people.push(label);
+  }
+  if (people.length) lines.push(`- People the Boss chats with (most recent first): ${people.join(', ')}`);
+  if (groups.length) lines.push(`- Groups: ${groups.join(', ')}`);
+
+  // ---- The Boss's own writing style (from their sent messages)
+  const myMsgs: string[] = [];
+  for (const list of waStore.messages.values()) {
+    for (const m of list) {
+      if (!m.key?.fromMe || m.key?.id?.startsWith('3A')) continue;
+      const { text, type } = await messageText(m);
+      const t = String(text || '').trim();
+      if (!t || type === 'stub' || type === 'unknown') continue;
+      myMsgs.push(t.slice(0, 300));
+      if (myMsgs.length >= 120) break;
+    }
+    if (myMsgs.length >= 120) break;
+  }
+  if (myMsgs.length >= 3) {
+    const lang = guessLanguage(myMsgs);
+    const avgLen = Math.round(myMsgs.reduce((n, s) => n + s.length, 0) / myMsgs.length);
+    const emojiRe = /[\p{Extended_Pictographic}\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}]/gu;
+    const withEmoji = myMsgs.filter((s) => emojiRe.test(s)).length;
+    const qCount = myMsgs.filter((s) => s.includes('?')).length;
+    const bangCount = myMsgs.filter((s) => s.includes('!')).length;
+    const lower = myMsgs.filter((s) => s === s.toLowerCase() && /[a-z]{2}/.test(s)).length;
+    const caps = myMsgs.filter((s) => /[A-Z]/.test(s[0] || '') && /[a-z]/.test(s.slice(1) || '')).length;
+    const freq = new Map<string, number>();
+    for (const s of myMsgs) {
+      for (const w of s.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+        if (w.length > 1 && !styleStopwords.has(w)) freq.set(w, (freq.get(w) || 0) + 1);
+      }
+    }
+    const topWords = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([w]) => w);
+    const styleBits = [
+      `language: ${lang}`,
+      `avg message length: ${avgLen} chars`,
+      `emoji in ~${Math.round((withEmoji / myMsgs.length) * 100)}% of messages`,
+      `questions: ${Math.round((qCount / myMsgs.length) * 100)}%, exclamations: ${Math.round((bangCount / myMsgs.length) * 100)}%`,
+      `lowercase style: ${Math.round((lower / myMsgs.length) * 100)}%, proper caps: ${Math.round((caps / myMsgs.length) * 100)}%`,
+      `frequent words: ${topWords.join(', ') || 'n/a'}`,
+    ];
+    lines.push(`- Boss chat style: ${styleBits.join('; ')}`);
+    const samples = myMsgs.slice(-4).map((s) => `    "…${s.slice(0, 120)}"`);
+    lines.push(`- Recent examples of the Boss's own messages:\n${samples.join('\n')}`);
+  }
+
+  // ---- Recent conversations (per chat, last few lines)
+  const recents: string[] = [];
+  for (const c of chats.slice(0, 6)) {
+    const list = (waStore.messages.get(c.jid) || []).slice(-6);
+    const block: string[] = [];
+    for (const m of list) {
+      const line = await formatMessageForContext(m);
+      if (line) block.push(`    ${line}`);
+    }
+    if (block.length) recents.push(`- Chat with ${c.name || displayNameFor(c.jid)}:\n${block.join('\n')}`);
+  }
+  if (recents.length) lines.push(`### RECENT CONVERSATIONS\n${recents.join('\n\n')}`);
+
+  const text = lines.join('\n');
+  kbCache = { builtAt: Date.now(), text };
+  return text;
+}
+
+function isReplyableMessage(m: WAMessage): boolean {
+  if (!m.key || !m.key.remoteJid) return false;
+  if (m.key.fromMe) return false;
+  if (m.key.id?.startsWith('3A')) return false;
+  // only personal DMs (skip groups, status, broadcasts)
+  if (!m.key.remoteJid.endsWith('@s.whatsapp.net')) return false;
+  if (m.messageStubType) return false;
+  return true;
+}
+
+async function getIncomingText(m: WAMessage): Promise<string> {
+  const { text, type } = await messageText(m);
+  const t = String(text || '').trim();
+  if (!t || type === 'stub' || type === 'unknown' || type === 'locationMessage') return '';
+  return t.slice(0, 500);
+}
+
+// Per-chat cooldown + one in-flight reply per chat to avoid reply storms.
+const autoReplyCooldowns = new Map<string, number>();
+const autoReplyInFlight = new Set<string>();
+const AUTO_REPLY_COOLDOWN_MS = 60_000;
+const AUTO_REPLY_MAX_LEN = 400;
+
+export async function maybeAutoReply(messages: WAMessage[]) {
+  if (!bossMode || connectionState !== 'connected' || !sock) return;
+  for (const m of messages) {
+    if (!isReplyableMessage(m)) continue;
+    const jid = m.key!.remoteJid!;
+    const now = Date.now();
+    const last = autoReplyCooldowns.get(jid) || 0;
+    if (now - last < AUTO_REPLY_COOLDOWN_MS || autoReplyInFlight.has(jid)) continue;
+
+    const incoming = await getIncomingText(m);
+    if (!incoming) continue;
+
+    autoReplyInFlight.add(jid);
+    try {
+      // mark the message as read
+      try {
+        await sock!.readMessages([m.key!]);
+      } catch {
+        // ignore
+      }
+
+      const kb = await getWhatsAppKnowledgeBase();
+      const chatName = displayNameFor(jid);
+      const recentList = (waStore.messages.get(jid) || []).slice(-12);
+      const recentLines: string[] = [];
+      for (const hm of recentList) {
+        const line = await formatMessageForContext(hm);
+        if (line) recentLines.push(line);
+      }
+
+      const ai = await getLocalGemini();
+      if (!ai) {
+        console.warn('[WhatsApp] Boss Mode: no GEMINI_API_KEY for auto-reply, skipping.');
+        autoReplyCooldowns.set(jid, Date.now());
+        continue;
+      }
+
+      const prompt = `You are replying on WhatsApp IN THE ROLE of "${profile?.name || 'the Boss'}" (Boss Mode). The owner has enabled Boss Mode: you answer incoming WhatsApp messages on their behalf, perfectly mimicking their writing style.
+
+INSTRUCTIONS:
+- Reply as the Boss would: match their language, tone, emoji usage, message length, capitalization and punctuation habits exactly.
+- Do NOT reveal you are an AI or an assistant. Never say "as an AI" or mention Boss Mode.
+- Keep it short and natural, like a real WhatsApp reply. When in doubt, reply briefly.
+- Use the Boss's own vocabulary from the knowledge base below.
+- If the message needs an answer only the Boss can give, reply as the Boss would handle it (e.g. confirm, defer briefly, ask a short follow-up).
+- Output ONLY the reply text. No quotes, no labels, no explanation.
+
+KNOWLEDGE BASE ABOUT THE BOSS:
+${kb}
+
+CONVERSATION HISTORY WITH ${chatName}:
+${recentLines.join('\n') || '(no prior history)'}
+
+INCOMING MESSAGE FROM ${chatName}:
+"${incoming}"
+
+YOUR REPLY:`;
+
+      const res = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+      const reply = (res?.text || '').trim().replace(/^["']|["']$/g, '');
+      if (!reply) {
+        console.warn('[WhatsApp] Boss Mode: empty reply generated, skipping.');
+        continue;
+      }
+      const trimmed = reply.slice(0, AUTO_REPLY_MAX_LEN);
+      await sock!.sendMessage(jid as any, { text: trimmed } as AnyMessageContent);
+      console.log(`[WhatsApp] Boss Mode: replied to ${jid} with ${trimmed.length} chars`);
+      autoReplyCooldowns.set(jid, Date.now());
+      try {
+        broadcast({
+          type: 'workspaceOutput',
+          tool: 'whatsapp',
+          action: 'boss_mode_auto_reply',
+          recipient: jid,
+          status: 'ok',
+          text: trimmed.slice(0, 120),
+        });
+      } catch {
+        // ignore
+      }
+    } catch (err: any) {
+      console.error('[WhatsApp] Boss Mode auto-reply failed:', err?.message || err);
+    } finally {
+      autoReplyInFlight.delete(jid);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2116,6 +2444,14 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       }
       case 'logout':
         return await logoutWhatsApp();
+      case 'get_knowledge_base':
+        return { ok: true, knowledgeBase: await getWhatsAppKnowledgeBase(true), bossMode: getBossMode() };
+      case 'set_boss_mode': {
+        if (connectionState !== 'connected') return { ok: false, error: 'WhatsApp is not connected.' };
+        const enabled = args?.enabled === undefined ? !bossMode : !!args.enabled;
+        const state = setBossMode(enabled);
+        return { ok: true, bossMode: state };
+      }
       default:
         return { ok: false, error: `Action "${action}" has no runner.` };
     }

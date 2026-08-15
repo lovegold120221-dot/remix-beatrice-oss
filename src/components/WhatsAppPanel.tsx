@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { Check, Copy, MessageCircle, Phone, QrCode, Unplug } from 'lucide-react';
+import { Check, Copy, Crown, MessageCircle, Phone, QrCode, Unplug, User } from 'lucide-react';
+
+export interface WhatsAppProfile {
+  name: string | null;
+  phone: string | null;
+  avatarUrl: string | null;
+}
 
 export interface WhatsAppPanelState {
   status: string;
@@ -8,6 +14,8 @@ export interface WhatsAppPanelState {
   qrDataUrl: string | null;
   error: string | null;
   reconnectAttempt?: number;
+  profile?: WhatsAppProfile | null;
+  bossMode?: boolean;
 }
 
 export interface WhatsAppApprovalState {
@@ -70,6 +78,7 @@ interface WhatsAppLinkCardProps {
   onQr: () => void;
   onCancel: () => void;
   onLogout: () => void;
+  onToggleBossMode?: (enabled: boolean) => void;
 }
 
 const statusMeta = (s: WhatsAppPanelState) => {
@@ -84,7 +93,7 @@ const statusMeta = (s: WhatsAppPanelState) => {
   return { dot: 'bg-[#48484a]', label: 'Not linked', pulse: false };
 };
 
-export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout }: WhatsAppLinkCardProps) {
+export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onToggleBossMode }: WhatsAppLinkCardProps) {
   const [mode, setMode] = useState<'qr' | 'code'>('qr');
   const [phone, setPhone] = useState('');
   const [copied, setCopied] = useState(false);
@@ -135,11 +144,95 @@ export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout }: W
         )}
 
         {status.connected && (
-          <p className="text-[0.7rem] text-[#8e8e93] leading-snug">
-            Beatrice is linked to WhatsApp. Chats, contacts, and messages are synced and saved to
-            Firebase. She can read conversations, send messages (with approval), transcribe voice
-            notes, and manage groups.
-          </p>
+          <>
+            {status.profile && (
+              <div className="flex items-center gap-3 rounded-2xl bg-black/40 border border-white/5 p-3">
+                {status.profile.avatarUrl ? (
+                  <img
+                    src={status.profile.avatarUrl}
+                    alt="WhatsApp profile"
+                    className="w-12 h-12 rounded-full object-cover border border-white/10"
+                    draggable={false}
+                  />
+                ) : (
+                  <div className="w-12 h-12 rounded-full bg-[#00f2fe]/10 border border-[#00f2fe]/30 flex items-center justify-center text-[#00f2fe]">
+                    <User className="w-6 h-6" strokeWidth={2} />
+                  </div>
+                )}
+                <div className="min-w-0">
+                  {status.profile.name && (
+                    <div className="text-sm font-semibold text-white truncate">
+                      {status.profile.name}
+                    </div>
+                  )}
+                  {status.profile.phone && (
+                    <div className="flex items-center gap-1.5 text-[11px] text-[#8e8e93] mt-0.5">
+                      <Phone className="w-3 h-3" />
+                      <span className="font-mono">{status.profile.phone}</span>
+                    </div>
+                  )}
+                  {!status.profile.name && !status.profile.phone && (
+                    <div className="text-[11px] text-[#8e8e93]">WhatsApp linked device</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {onToggleBossMode && (
+              <div
+                className={`flex items-center gap-3 rounded-2xl border p-3 transition-colors ${
+                  status.bossMode
+                    ? 'bg-[#00f2fe]/10 border-[#00f2fe]/40'
+                    : 'bg-black/40 border-white/5'
+                }`}
+              >
+                <div
+                  className={`w-9 h-9 rounded-full flex items-center justify-center border transition-colors ${
+                    status.bossMode
+                      ? 'bg-[#00f2fe] text-black border-[#00f2fe] shadow-lg shadow-[#00f2fe]/30'
+                      : 'bg-white/5 text-[#8e8e93] border-white/10'
+                  }`}
+                >
+                  <Crown className="w-4.5 h-4.5" strokeWidth={2.2} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                    Boss Mode
+                    {status.bossMode && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-[#00f2fe]/20 text-[#00f2fe] border border-[#00f2fe]/40 font-bold">
+                        ACTIVE
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-[#8e8e93] leading-snug mt-0.5">
+                    {status.bossMode
+                      ? 'Beatrice replies to incoming chats as you, in your own style.'
+                      : 'Let Beatrice answer incoming chats in your style.'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onToggleBossMode(!status.bossMode)}
+                  aria-label={status.bossMode ? 'Turn Boss Mode off' : 'Turn Boss Mode on'}
+                  className={`relative w-11 h-[26px] rounded-full p-[2px] transition-colors cursor-pointer shrink-0 ${
+                    status.bossMode ? 'bg-[#00f2fe]' : 'bg-white/15'
+                  }`}
+                >
+                  <div
+                    className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transition-transform ${
+                      status.bossMode ? 'translate-x-[18px]' : ''
+                    }`}
+                  />
+                </button>
+              </div>
+            )}
+
+            <p className="text-[0.7rem] text-[#8e8e93] leading-snug">
+              Beatrice is linked to WhatsApp. Chats, contacts, and messages are synced and saved to
+              Firebase. She can read conversations, send messages (with approval), transcribe voice
+              notes, and manage groups.
+            </p>
+          </>
         )}
 
         {!status.connected && (

@@ -978,7 +978,7 @@ function getFunctionDeclarations() {
           description: 'Reports the current WhatsApp in-memory store (chats/contacts/messages) and confirms automatic history sync.',
           parameters: { type: Type.OBJECT, properties: {} },
         },
-        {
+{
           name: 'whatsapp_call',
           description: 'Initiates a WhatsApp voice call. NOTE: not supported by the WhatsApp Web protocol used by this session — informs the user to call from the phone instead.',
           parameters: {
@@ -987,6 +987,53 @@ function getFunctionDeclarations() {
               recipient: { type: Type.STRING, description: 'Contact name, phone number, or JID' },
             },
             required: ['recipient'],
+          },
+        },
+        {
+          name: 'remember_memory',
+          description: 'Saves a conversation turn or fact to Beatrice\'s long-term memory (MemoryCore L0). The memory is stored under the current session and can later be recalled via search or query. Use when the Boss says something important that should not be forgotten.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              session_id: { type: Type.STRING, description: 'Optional session ID; auto-generated if omitted.' },
+              messages: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    role: { type: Type.STRING, enum: ['user', 'assistant'], description: 'Message sender role' },
+                    content: { type: Type.STRING, description: 'Message text content' },
+                    timestamp: { type: Type.STRING, description: 'ISO-8601 timestamp optional' },
+                  },
+                  required: ['role', 'content'],
+                },
+                description: 'Array of message objects to persist.',
+              },
+            },
+            required: ['messages'],
+          },
+        },
+        {
+          name: 'recall_memory',
+          description: 'Searches Beatrice\'s long-term memory for conversations matching a keyword query. Uses BM25 keyword search across stored L0 conversations. Returns matching messages with relevance scores.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              query: { type: Type.STRING, description: 'Keyword or phrase to search for in conversation content.' },
+              limit: { type: Type.NUMBER, description: 'Maximum number of results to return (default 5).' },
+              session_id: { type: Type.STRING, description: 'Optional filter to limit search to a specific session.' },
+            },
+            required: ['query'],
+          },
+        },
+        {
+          name: 'get_core_memory',
+          description: 'Reads Beatrice\'s current L3 persona/core memory. Returns the concise profile summary that captures the Boss\'s traits, style, and context. This is injected into the system prompt on WS connect.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              version: { type: Type.STRING, description: 'Optional; returns historical version if specified, otherwise current latest.' },
+            },
           },
         },
       ],
@@ -1620,6 +1667,12 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                     toolResult = await handleSyncWhatsAppHistory(args as any, toolCtx);
                   } else if (name === 'whatsapp_call') {
                     toolResult = await handleWhatsAppCall(args as any, toolCtx);
+                  } else if (name === 'remember_memory') {
+                    toolResult = await fetchMemoryAdd(args as any, toolCtx);
+                  } else if (name === 'recall_memory') {
+                    toolResult = await fetchMemorySearch(args as any, toolCtx);
+                  } else if (name === 'get_core_memory') {
+                    toolResult = await fetchCoreRead(args as any, toolCtx);
                   } else {
                     toolResult = { error: `Unknown tool name: ${name}` };
                   }
@@ -1980,6 +2033,70 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);
 });
+
+// MemoryCore gateway integration handlers
+async function fetchMemoryAdd(body: any, toolCtx: any): Promise<any> {
+  const apiKey = process.env.TDAI_LLM_API_KEY || "beatrice-llm-proxy";
+  const serviceId = process.env.TDAI_LLM_SERVICE_ID || "beatrice-memory";
+  const payload = {
+    session_id: body?.session_id,
+    messages: body?.messages,
+  };
+  const res = await fetch("http://127.0.0.1:8420/v2/conversation/add", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "x-tdai-service-id": serviceId,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
+  return { ok: true, data };
+}
+
+async function fetchMemorySearch(body: any, toolCtx: any): Promise<any> {
+  const apiKey = process.env.TDAI_LLM_API_KEY || "beatrice-llm-proxy";
+  const serviceId = process.env.TDAI_LLM_SERVICE_ID || "beatrice-memory";
+  const payload = {
+    query: body?.query,
+    limit: body?.limit ?? 5,
+    session_id: body?.session_id,
+  };
+  const res = await fetch("http://127.0.0.1:8420/v2/conversation/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "x-tdai-service-id": serviceId,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
+  return { ok: true, data };
+}
+
+async function fetchCoreRead(body: any, toolCtx: any): Promise<any> {
+  const apiKey = process.env.TDAI_LLM_API_KEY || "beatrice-llm-proxy";
+  const serviceId = process.env.TDAI_LLM_SERVICE_ID || "beatrice-memory";
+  const payload = {
+    version: body?.version,
+  };
+  const res = await fetch("http://127.0.0.1:8420/v2/core/read", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "x-tdai-service-id": serviceId,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
+  return { ok: true, data };
+}
 
 startServer().catch((err) => {
   console.error('Fatal startServer error:', err);

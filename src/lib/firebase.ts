@@ -10,6 +10,14 @@ export const auth = getAuth(app);
 export const storage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
 
+// Always show the Google consent screen and request Google services
+// permissions (Gmail/Drive/Calendar/Forms/etc.) on every sign-in, so the
+// access token we persist carries the scopes the agent needs for CRUD.
+googleProvider.setCustomParameters({
+  prompt: 'consent',
+  access_type: 'offline',
+});
+
 // OAuth client ID from Google Cloud (for reference / future use)
 export const oAuthClientId = (firebaseConfig as any).oAuthClientId || '112636717363-jc7shven29f6v0014h5f11mjt9bhl0hp.apps.googleusercontent.com';
 googleProvider.addScope('https://www.googleapis.com/auth/drive');

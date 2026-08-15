@@ -68,11 +68,10 @@ import {
   User as UserIcon,
   Brain,
   Volume2,
-  ListChecks,
 } from 'lucide-react';
 
 export default function App() {
-  const { user, signInWithGoogle } = useAuth();
+  const { user, signInWithGoogle, explicitlyAuthenticated, loading: authLoading } = useAuth();
   const [status, setStatus] = useState<SessionStatus>('disconnected');
   const [toolLogs, setToolLogs] = useState<ToolCallLog[]>([]);
   const [sandboxRuns, setSandboxRuns] = useState<CodeSandboxRun[]>([]);
@@ -90,6 +89,7 @@ export default function App() {
     pairingCode: null,
     qrDataUrl: null,
     error: null,
+    profile: null,
   });
   const [waApproval, setWaApproval] = useState<WhatsAppApprovalState | null>(null);
 
@@ -97,10 +97,25 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isTasksOpen, setIsTasksOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
-  const [showIntro, setShowIntro] = useState<boolean>(true);
+  const [showIntro, setShowIntro] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('beatrice_intro_done') !== '1';
+    } catch {
+      return true;
+    }
+  });
   const [showIntroSkip, setShowIntroSkip] = useState<boolean>(false);
   const [introMuted, setIntroMuted] = useState<boolean>(true);
-  const [introDone, setIntroDone] = useState<boolean>(false);
+  // Persisted in sessionStorage so a Google OAuth redirect round-trip
+  // (full-page navigation) doesn't replay the intro: the user lands back
+  // on the main page right after granting permissions.
+  const [introDone, setIntroDone] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('beatrice_intro_done') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [skipAuth, setSkipAuth] = useState<boolean>(false);
   const [streamType, setStreamType] = useState<'camera' | 'screen' | 'off'>('off');
   const [facingMode, setFacingMode] = useState<CameraFacingMode>('user');
@@ -177,6 +192,29 @@ export default function App() {
       return updated;
     });
   }, []);
+
+  // Auto-open the Tasks page when a new task is triggered (by Beatrice or tools)
+  const seenActiveTaskIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const running: string[] = [];
+    for (const t of agentTasks) {
+      if (t.status === 'thinking' || t.status === 'executing') running.push(t.id);
+    }
+    for (const s of codingAgentSessions) {
+      if (s.status === 'starting' || s.status === 'running') running.push(s.id);
+    }
+    for (const t of videoTasks) {
+      if (t.status !== 'completed' && t.status !== 'failed' && t.status !== 'error') running.push(t.id);
+    }
+    for (const t of qwenTasks) {
+      if (t.status !== 'completed' && t.status !== 'failed' && t.status !== 'error') running.push(t.id);
+    }
+    const fresh = running.find((id) => !seenActiveTaskIds.current.has(id));
+    if (fresh) {
+      seenActiveTaskIds.current.add(fresh);
+      setIsTasksOpen(true);
+    }
+  }, [agentTasks, codingAgentSessions, videoTasks, qwenTasks]);
 
   // Sync VAD callbacks with AudioController
   useEffect(() => {
@@ -577,6 +615,8 @@ export default function App() {
               qrDataUrl: msg.qrDataUrl ?? null,
               error: msg.error ?? null,
               reconnectAttempt: msg.reconnectAttempt ?? 0,
+              profile: msg.profile ?? null,
+              bossMode: msg.bossMode ?? false,
             });
             break;
 
@@ -907,7 +947,10 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  const gatePassed = introDone && (!!user || skipAuth);
+  // Gate requires explicit sign-in (or guest skip). A silently restored Firebase
+  // session does NOT pass the gate: the skip button always routes to the AuthPage
+  // (create account / login) so the Google OAuth token is renewed on every entry.
+  const gatePassed = introDone && (explicitlyAuthenticated || skipAuth);
 
   // Block pinch/double-tap/ctrl-wheel zoom (vertical scrolling stays untouched)
   useEffect(() => {
@@ -933,6 +976,11 @@ export default function App() {
   const finishIntro = useCallback(() => {
     setShowIntro(false);
     setIntroDone(true);
+    try {
+      sessionStorage.setItem('beatrice_intro_done', '1');
+    } catch {
+      // ignore
+    }
   }, []);
 
   const handleIntroLoaded = useCallback(() => {
@@ -1417,7 +1465,25 @@ export default function App() {
       pairingCode: null,
       qrDataUrl: null,
       error: null,
+      profile: null,
+      bossMode: false,
     });
+  };
+
+  const handleToggleWhatsAppBossMode = async (enabled: boolean) => {
+    setWaStatus((s) => ({ ...s, bossMode: enabled }));
+    try {
+      const res = await fetch('/api/whatsapp/boss-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await res.json();
+      setWaStatus((s) => ({ ...s, bossMode: !!data.bossMode }));
+    } catch (err: any) {
+      console.error('Boss Mode toggle error:', err);
+      setWaStatus((s) => ({ ...s, bossMode: !enabled }));
+    }
   };
 
   const handleUpdateConfig = (newCfg: Partial<BeatriceConfig>) => {
@@ -1481,17 +1547,6 @@ export default function App() {
         {/* Glassmorphism Header */}
         <header className="px-6 pt-[max(24px,env(safe-area-inset-top))] pb-4 flex items-center justify-between z-20 bg-gradient-to-b from-black/80 to-transparent sticky top-0">
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                triggerHaptic(10);
-                setIsTasksOpen(true);
-              }}
-              className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-white/15 cursor-pointer"
-              aria-label="Active Tasks"
-              title="View Active Tasks"
-            >
-              <ListChecks className="w-5 h-5" strokeWidth={2.5} />
-            </button>
             <button
               onClick={() => {
                 triggerHaptic(10);
@@ -1732,9 +1787,14 @@ export default function App() {
         onQrPairWhatsApp={handleQrPairWhatsApp}
         onCancelWhatsAppPairing={handleCancelWhatsAppPairing}
         onLogoutWhatsApp={handleLogoutWhatsApp}
+        onToggleWhatsAppBossMode={handleToggleWhatsAppBossMode}
         onOpenProfile={() => {
           setIsSettingsOpen(false);
           setIsProfileOpen(true);
+        }}
+        onOpenTasker={() => {
+          setIsSettingsOpen(false);
+          setIsTasksOpen(true);
         }}
       />
 
@@ -1763,8 +1823,9 @@ export default function App() {
         </>
       )}
 
-      {/* Auth Gate Page */}
-      {!showIntro && !gatePassed && <AuthPage onSkip={() => setSkipAuth(true)} />}
+      {/* Auth Gate Page — wait for auth init (e.g. redirect result resume) to
+          avoid flashing the login page after Google grants permissions */}
+      {!showIntro && !authLoading && !gatePassed && <AuthPage onSkip={() => setSkipAuth(true)} />}
 
       {/* Tasks/Processes Page - shows ongoing automation processes */}
       {isTasksOpen && (
