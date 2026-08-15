@@ -100,80 +100,11 @@ export async function listGoogleContacts(
     }
   } catch (err) {
     console.error('Error fetching Google Contacts:', err);
+    return { contacts: [], totalCount: 0 };
   }
 
-  // High-quality mock defaults for Eburon AI Workspace
-  const defaultContacts: GoogleContact[] = [
-    {
-      id: 'c_1',
-      name: 'Jo Lernout',
-      givenName: 'Jo',
-      familyName: 'Lernout',
-      email: 'jo@eburon.ai',
-      phone: '+32 470 123 456',
-      organization: 'Eburon AI',
-      title: 'Chief Executive Officer',
-      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-      notes: 'Lead executive for Beatrice AI Voice & Google Workspace Integration.',
-      address: 'Hasselt, Flanders, Belgium',
-      starred: true,
-    },
-    {
-      id: 'c_2',
-      name: 'Beatrice Support & AI Operations',
-      givenName: 'Beatrice',
-      familyName: 'Support',
-      email: 'support@eburon.ai',
-      phone: '+1 (800) 555-0199',
-      organization: 'Eburon AI Studio',
-      title: 'Customer Success & Real-Time Sync',
-      avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150',
-      notes: '24/7 Voice Assistant hotline and developer support queue.',
-      address: 'Singapore & Silicon Valley',
-      starred: true,
-    },
-    {
-      id: 'c_3',
-      name: 'Elena Rostova',
-      givenName: 'Elena',
-      familyName: 'Rostova',
-      email: 'elena.rostova@cloudpartners.dev',
-      phone: '+1 (415) 890-2341',
-      organization: 'Google Cloud Platform Lead',
-      title: 'Senior Solutions Architect',
-      avatarUrl: 'https://images.unsplash.com/photo-1580489944761-15a19d654956?w=150',
-      notes: 'Main contact for Cloud SQL, Vertex AI & GCP OAuth credentials.',
-      address: 'Mountain View, California, USA',
-      starred: false,
-    },
-    {
-      id: 'c_4',
-      name: 'Marcus Vance',
-      givenName: 'Marcus',
-      familyName: 'Vance',
-      email: 'm.vance@techcorp.io',
-      phone: '+44 20 7946 0912',
-      organization: 'TechCorp International',
-      title: 'Head of Enterprise Workspace',
-      avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150',
-      notes: 'Interested in enterprise deployment of Beatrice Voice with Google Workspace.',
-      address: 'London, United Kingdom',
-      starred: false,
-    },
-  ];
-
-  if (query.trim()) {
-    const q = query.toLowerCase();
-    const filtered = defaultContacts.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.email.toLowerCase().includes(q) ||
-        (c.organization && c.organization.toLowerCase().includes(q))
-    );
-    return { contacts: filtered, totalCount: filtered.length };
-  }
-
-  return { contacts: defaultContacts, totalCount: defaultContacts.length };
+  // No mock data — return empty results when API unavailable or no query
+  return { contacts: [], totalCount: 0 };
 }
 
 /**
@@ -219,12 +150,8 @@ export async function createGoogleContact(
       }
     }
 
-    // Fallback
-    const localContact: GoogleContact = {
-      id: `c_${Math.random().toString(36).substring(2, 9)}`,
-      ...contact,
-    };
-    return { success: true, contact: localContact };
+    // Fallback — no mock IDs; return failure so caller can surface "create failed"
+    return { success: false, error: 'Contact creation failed without access token' };
   } catch (err: any) {
     console.error('Error creating Google contact:', err);
     return { success: false, error: err.message };
