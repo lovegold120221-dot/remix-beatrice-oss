@@ -171,7 +171,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
       style={{ opacity: isPageVisible ? 1 : 0 }}
     >
       {/* Sticky Header with Task Title and Close Icon */}
-      <header className="shrink-0 bg-[#050505]/90 backdrop-blur-xl border-b border-white/10 px-4 py-3 flex items-center justify-between">
+      <header className="shrink-0 bg-[#050505]/90 backdrop-blur-xl border-b border-white/10 px-4 pt-[max(12px,env(safe-area-inset-top))] pb-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-bold tracking-tight text-white">
             {pageTab === 'viewport' ? (

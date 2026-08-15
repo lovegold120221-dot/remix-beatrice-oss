@@ -4,6 +4,7 @@
       "$userId": {
         ".read": "auth != null && auth.uid === $userId",
         ".write": "auth != null && auth.uid === $userId",
+        ".indexOn": ["timestamp"],
         "$transcriptId": {
           ".validate": "newData.hasChildren(['role', 'text', 'timestamp', 'userId'])",
           "role": { ".validate": "newData.val() === 'user' || newData.val() === 'model' || newData.val() === 'system'" },
@@ -31,8 +32,11 @@
         ".read": "auth != null && auth.uid === $userId",
         ".write": "auth != null && auth.uid === $userId",
         ".validate": "newData.hasChildren(['voiceName', 'userId'])",
-        "voiceName": { ".validate": "newData.val() === 'Zephyr' || newData.val() === 'Puck' || newData.val() === 'Charon' || newData.val() === 'Kore' || newData.val() === 'Fenrir'" },
+        "voiceName": { ".validate": "newData.val() === 'Aoede' || newData.val() === 'Zephyr' || newData.val() === 'Puck' || newData.val() === 'Charon' || newData.val() === 'Kore' || newData.val() === 'Fenrir'" },
         "systemInstruction": { ".validate": "newData.isString() && newData.val().length <= 2000" },
+        "preferredLanguage": { ".validate": "newData.isString() && newData.val().length <= 64" },
+        "videoFps": { ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 30" },
+        "updatedAt": { ".validate": "newData.isNumber()" },
         "userId": { ".validate": "newData.val() === $userId" }
       }
     },
@@ -40,6 +44,7 @@
       "$userId": {
         ".read": "auth != null && auth.uid === $userId",
         ".write": "auth != null && auth.uid === $userId",
+        ".indexOn": ["timestamp"],
         "$sessionId": {
           ".validate": "newData.hasChildren(['userId', 'title', 'timestamp'])",
           "userId": { ".validate": "newData.val() === $userId" },

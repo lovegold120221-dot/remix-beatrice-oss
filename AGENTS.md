@@ -6,6 +6,7 @@
 - `npm run dev` — runs `tsx server.ts` (Express + Vite middleware + WS)
 - `npm run build` — `vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs`
 - `npm start` — `node dist/server.cjs`
+- `npm run preview` — `vite preview` only (static SPA, no Express/WS/tools). Use `npm start` for the real server.
 - `npm run lint` — `tsc --noEmit` (typecheck; only "lint" step)
 - `npm run clean` — `rm -rf dist server.js` (note: `server.js` target is stale)
 - `node make_prompt.cjs` — regenerate `system_prompt.md` from the source template literal inside the script. Note: `.js` would fail because package.json is `"type": "module"`; the canonical file is the `.cjs` variant.
@@ -21,6 +22,8 @@ Always run `npm run lint` for verification. No test script or tests exist.
 - `NODE_ENV=production` switches server to serve `dist/` static + SPA fallback.
 - `WHATSAPP_SEND_AUTO_APPROVE` (default `true`) — set to `false` to require human approval for outgoing WhatsApp messages.
 - `WHATSAPP_AUTH_DIR` (default `data/whatsapp-auth`) — Baileys auth state directory.
+- `FIREBASE_SERVICE_ACCOUNT` (default `/opt/beatrice-services/beatrice-os-service-account.json`) — admin SA for RTDB persistence of the WhatsApp store. NOTE: that default key is revoked (invalid_grant); `.env.local` points to `data/beatrice-os-owner-service-account.json` (owner SA copied from `/root/voxx-zero/service-account.json`, same `beatrice-os` project) — do not delete.
+- `FIREBASE_RTDB_URL` (default `https://beatrice-os-default-rtdb.europe-west1.firebasedatabase.app`) — must match `databaseURL` in `firebase-applet-config.json`; without it `initRTDB()` in `server/whatsapp-tools.ts` fails with "Can't determine Firebase Database URL".
 
 ## Architecture & Wiring
 - Single package (no monorepo workspaces).
@@ -43,14 +46,17 @@ Always run `npm run lint` for verification. No test script or tests exist.
 - Vite serves SPA; index.html at root points to `/src/main.tsx`.
 - make_prompt.cjs embeds full voice personality + lore; `system_prompt.md` is the generated runtime copy loaded by server.ts on WS connect. `knowledge_base.md` is also loaded and appended as a compact global KB.
 - Hardcoded model: `gemini-3.1-flash-live-preview` in server.ts. Default voice: `Aoede` (not Zephyr).
+- Baileys v7 needs `globalThis.crypto.subtle`, which Node 18 (systemd's `/usr/bin/node`) does NOT expose for CJS file entrypoints (only stdin/eval). `server/whatsapp-tools.ts` polyfills `globalThis.crypto = webcrypto` from `node:crypto` at module top — do not remove it; without it every pairing attempt fails with "Cannot destructure property 'subtle' of 'globalThis.crypto'".
 - package.json "name": "react-example" (stale).
 - Both `package-lock.json` and `bun.lock` exist; npm is the canonical package manager per AGENTS.md commands.
 
 ## Other Notes
 - No ESLint, Prettier, tests, CI, or task runner.
 - Firebase applet config, firestore.rules, firebase-blueprint.json present (auth scopes include Drive/Gmail/Forms etc.).
+- `database.rules.json` is the deployed RTDB ruleset (merged into the live DB — see below): strict per-UID rules for `transcripts`/`tool_logs`/`user_configs`/`saved_sessions`, `whatsapp_store` server-only, and `auth != null` for the sibling project's paths (`users`, `agentProfiles`, `devicePairs`, `deviceTasks`, `agentState`, `webSessionBindings`, `memory`, `settings`). The live DB previously ran wide-open rules (`".read": true, ".write": true`) — if the deployed rules drift, re-deploy via the REST endpoint `.settings/rules.json` using the owner SA from `/root/voxx-zero/service-account.json` with scopes `firebase` + `userinfo.email` (the `firebase-adminsdk` key is revoked, so token minting must use the owner SA).
 - Google OAuth web credentials (`google-web-credentials.json`) + env vars for the new client.
 - `data/` directory (gitignored) stores WhatsApp auth state + media, sandbox previews, and coding-agent logs.
+- `task-page.html` is a standalone demo page (not served by the app; do not wire it into the SPA).
 - For local outside AI Studio: camera/mic + valid GEMINI_API_KEY needed for core features; Google OAuth for workspace tools; WhatsApp requires phone pairing via Baileys.
 
 ## Production (Let's Encrypt + domain)
@@ -61,6 +67,7 @@ Always run `npm run lint` for verification. No test script or tests exist.
   - ExecStart: `/usr/bin/node dist/server.cjs`
   - Restart: always
   - Run `systemctl daemon-reload && systemctl restart beatrice-oss.service` after deploy.
+  - Note: the other `beatrice-*.service` units on this host (`beatrice-services`, `beatrice-vps-bridge`) belong to a separate project at `/opt/beatrice-services` — don't restart/edit them when deploying this repo.
 - Use reverse proxy for HTTPS:
   - **Recommended (easiest):** Caddy (see Caddyfile) — auto Let's Encrypt.
   - Alternative: Nginx + certbot (see nginx-oss.conf).

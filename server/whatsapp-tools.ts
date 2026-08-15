@@ -2,6 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
 import QRCode from 'qrcode';
+import { webcrypto } from 'node:crypto';
+
+// Node 18 (used by the systemd unit's `/usr/bin/node dist/server.cjs`) does not
+// expose `globalThis.crypto` when the main entry is a CJS file, only for
+// stdin/eval entrypoints. Baileys v7 destructures `globalThis.crypto.subtle`
+// at module load, so polyfill it from node:crypto before any lazy import runs.
+if (!globalThis.crypto) {
+  (globalThis as any).crypto = webcrypto;
+}
 
 // Baileys is ESM-only. We load it lazily so the CommonJS production bundle can start.
 let baileys: typeof import('@whiskeysockets/baileys') | null = null;
@@ -207,6 +216,10 @@ function registerContact(jid: string, name?: string, notify?: string, pushName?:
 
 let fbDb: any = null;
 
+const RTDB_URL =
+  process.env.FIREBASE_RTDB_URL ||
+  'https://beatrice-os-default-rtdb.europe-west1.firebasedatabase.app';
+
 async function initRTDB(): Promise<any> {
   if (fbDb) return fbDb;
   const saPath =
@@ -217,7 +230,7 @@ async function initRTDB(): Promise<any> {
     const appMod: any = await import('firebase-admin/app');
     const dbMod: any = await import('firebase-admin/database');
     if (!appMod.getApps?.().length) {
-      appMod.initializeApp({ credential: appMod.cert(saPath) });
+      appMod.initializeApp({ credential: appMod.cert(saPath), databaseURL: RTDB_URL });
     }
     fbDb = dbMod.getDatabase();
     return fbDb;

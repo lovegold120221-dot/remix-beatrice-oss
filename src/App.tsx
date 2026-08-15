@@ -1479,7 +1479,7 @@ export default function App() {
         <div className="absolute top-[20%] left-[10%] right-[10%] bottom-[20%] bg-[radial-gradient(circle,rgba(0,242,254,0.15)_0%,transparent_70%)] z-0 pointer-events-none" />
 
         {/* Glassmorphism Header */}
-        <header className="px-6 pt-6 pb-4 sm:pt-[max(24px,env(safe-area-inset-top))] flex items-center justify-between z-20 bg-gradient-to-b from-black/80 to-transparent sticky top-0">
+        <header className="px-6 pt-[max(24px,env(safe-area-inset-top))] pb-4 flex items-center justify-between z-20 bg-gradient-to-b from-black/80 to-transparent sticky top-0">
           <div className="flex items-center gap-2">
             <button
               onClick={() => {
@@ -1562,7 +1562,7 @@ export default function App() {
         </main>
 
 {/* Bottom Native Footer Controls */}
-        <footer className="px-6 pb-12 pt-0 bg-gradient-to-t from-black 20% to-transparent flex items-end justify-between z-20 relative">
+        <footer className="px-6 pb-[max(48px,env(safe-area-inset-bottom))] pt-0 bg-gradient-to-t from-black 20% to-transparent flex items-end justify-between z-20 relative">
           {/* Chat Button */}
           <button
             onClick={() => {
@@ -1638,7 +1638,7 @@ export default function App() {
         {/* Sliding Mobile Drawer Overlay */}
         {activeDrawer !== 'none' && (
           <div className="absolute inset-0 z-30 bg-black/60 backdrop-blur-[30px] flex flex-col transition-all animate-in fade-in duration-300">
-            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between bg-black/40">
+            <div className="px-5 pt-[max(16px,env(safe-area-inset-top))] pb-4 border-b border-white/10 flex items-center justify-between bg-black/40">
               <span className="text-xs font-bold uppercase tracking-wider text-[#8e8e93]">
                 {activeDrawer === 'chat'
                   ? 'Realtime Chat Transcript'
@@ -1803,7 +1803,7 @@ export default function App() {
             <button
               type="button"
               onClick={handleIntroUnmute}
-              className="absolute top-6 right-6 w-11 h-11 rounded-full bg-white/10 backdrop-blur-xl border border-white/20 text-white hover:bg-white/20 active:scale-95 transition-all cursor-pointer shadow-lg flex items-center justify-center"
+              className="absolute top-[max(24px,env(safe-area-inset-top))] right-6 w-11 h-11 rounded-full bg-white/10 backdrop-blur-xl border border-white/20 text-white hover:bg-white/20 active:scale-95 transition-all cursor-pointer shadow-lg flex items-center justify-center"
               title="Enable Sound"
             >
               <Volume2 className="w-5 h-5" />
@@ -1813,7 +1813,7 @@ export default function App() {
             <button
               type="button"
               onClick={finishIntro}
-              className="absolute bottom-6 right-6 px-5 py-2.5 rounded-full bg-white/10 backdrop-blur-xl border border-white/20 text-white text-sm font-semibold hover:bg-white/20 active:scale-95 transition-all cursor-pointer shadow-lg"
+              className="absolute bottom-[max(24px,env(safe-area-inset-bottom))] right-6 px-5 py-2.5 rounded-full bg-white/10 backdrop-blur-xl border border-white/20 text-white text-sm font-semibold hover:bg-white/20 active:scale-95 transition-all cursor-pointer shadow-lg"
             >
               Skip
             </button>
