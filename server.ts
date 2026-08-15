@@ -1988,6 +1988,14 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
       });
   });
 
+  // Public pages — no authentication required
+  app.get('/privacy', (req, res) => {
+    res.sendFile(path.join(process.cwd(), 'privacy.html'));
+  });
+  app.get('/terms', (req, res) => {
+    res.sendFile(path.join(process.cwd(), 'terms.html'));
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
