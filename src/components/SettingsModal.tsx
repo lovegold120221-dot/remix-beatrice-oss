@@ -5,6 +5,7 @@ import {
   LogIn,
   LogOut,
   Sliders,
+  Terminal,
   X,
 } from 'lucide-react';
 import { BeatriceConfig, VOICE_NAMES, voiceAlias, VoiceName } from '../types';
@@ -23,6 +24,7 @@ interface SettingsModalProps {
   onSaveVadConfig?: (newConfig: Partial<VadConfig>) => void;
   onOpenProfile?: () => void;
   onOpenTasker?: () => void;
+  onOpenTerminal?: () => void;
   waStatus?: WhatsAppPanelState;
   onPairWhatsApp?: (phone: string) => void;
   onQrPairWhatsApp?: () => void;
@@ -105,6 +107,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveVadConfig,
   onOpenProfile,
   onOpenTasker,
+  onOpenTerminal,
   waStatus,
   onPairWhatsApp,
   onQrPairWhatsApp,
@@ -485,6 +488,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               />
             </div>
           </div>
+
+          {/* Workstation */}
+          {onOpenTerminal && (
+            <div className="space-y-1.5">
+              <SectionLabel>Workstation</SectionLabel>
+              <button
+                type="button"
+                onClick={onOpenTerminal}
+                className="w-full rounded-2xl bg-[#121215] border border-white/10 overflow-hidden active:bg-white/[0.06] transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-3 px-4 py-3.5">
+                  <div className="w-9 h-9 rounded-full bg-emerald-400/10 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
+                    <Terminal className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="font-semibold text-white text-xs">Beatrice Work Station</div>
+                    <div className="text-[10px] text-[#8e8e93] font-mono uppercase tracking-widest">
+                      Open a shell on the server
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-[#8e8e93]" />
+                </div>
+              </button>
+            </div>
+          )}
 
           {/* Voice & Language */}
           <div className="space-y-1.5">

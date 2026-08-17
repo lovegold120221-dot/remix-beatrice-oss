@@ -73,7 +73,6 @@ import {
   User as UserIcon,
   Brain,
   Volume2,
-  Terminal as TerminalIcon,
 } from 'lucide-react';
 
 export default function App() {
@@ -1687,17 +1686,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                triggerHaptic(10);
-                openLocalTerminal();
-              }}
-              className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-white/15 cursor-pointer"
-              aria-label="Local Terminal"
-              title="Open Local Terminal"
-            >
-              <TerminalIcon className="w-5 h-5" strokeWidth={2.5} />
-            </button>
             {user ? (
               <img
                 src={user.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=100&q=80'}
@@ -1926,6 +1914,10 @@ export default function App() {
         onOpenTasker={() => {
           setIsSettingsOpen(false);
           setIsTasksOpen(true);
+        }}
+        onOpenTerminal={() => {
+          setIsSettingsOpen(false);
+          openLocalTerminal();
         }}
       />
 
