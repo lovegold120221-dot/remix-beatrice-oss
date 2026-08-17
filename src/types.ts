@@ -15,6 +15,15 @@ export const voiceAlias = (voice: VoiceName): string => VOICE_ALIASES[voice] || 
 
 export type SessionStatus = 'disconnected' | 'connecting' | 'connected' | 'speaking' | 'listening' | 'error';
 
+export type DeviceType = 'mobile' | 'desktop';
+
+export interface TerminalInfo {
+  host: string;
+  port: number;
+  user: string;
+  sshUrl: string;
+}
+
 export interface AudioVisualizerData {
   inputVolume: number;
   outputVolume: number;
@@ -185,6 +194,7 @@ export interface SessionBootstrap {
   userDisplayName?: string;
   uid?: string | null;
   email?: string | null;
+  deviceType?: DeviceType;
 }
 
 export type WsClientMessage =
@@ -230,6 +240,7 @@ export type WsServerMessage =
   | { type: 'whatsappStatus'; status: string; connected: boolean; pairingCode?: string | null; qrDataUrl?: string | null; error?: string | null; reconnectAttempt?: number; profile?: { name: string | null; phone: string | null; avatarUrl: string | null } | null; bossMode?: boolean; uid?: string | null; email?: string | null }
   | { type: 'whatsappApprovalRequest'; id: string; recipient: string; recipientName?: string; purpose?: string }
   | { type: 'whatsappIncomingMessages'; messages: { id?: string; chatJid?: string; chatName?: string; fromMe?: boolean; sender?: string; timestamp?: number | null; type?: string; text?: string }[] }
+  | { type: 'terminalOpen'; deviceType: DeviceType; mode: 'browser' | 'termius'; sshUrl?: string; host?: string; port?: number; user?: string; command?: string }
   | { type: 'error'; message: string };
 
 export interface ContextWindowConfig {

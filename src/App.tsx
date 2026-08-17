@@ -11,8 +11,10 @@ import {
   ComputerStreamSession,
   ContextWindowConfig,
   ConversationMemoryState,
+  DeviceType,
   QwenCloudTask,
   SessionStatus,
+  TerminalInfo,
   ToolCallLog,
   TranscriptItem,
   VideoGenerationTask,
@@ -32,6 +34,8 @@ import { VadControlWidget } from './components/VadControlWidget';
 import { WhatsAppApprovalModal, WhatsAppApprovalState, WhatsAppPanelState } from './components/WhatsAppPanel';
 import { WhatsAppOnboarding } from './components/WhatsAppOnboarding';
 import { TasksPage } from './components/TasksPage';
+import { LocalTerminal } from './components/LocalTerminal';
+import { detectDeviceType } from './lib/device';
 import { useAuth } from './context/AuthContext';
 import { AuthPage } from './components/AuthPage';
 import { db, auth } from './lib/firebase';
@@ -69,6 +73,7 @@ import {
   User as UserIcon,
   Brain,
   Volume2,
+  Terminal as TerminalIcon,
 } from 'lucide-react';
 
 export default function App() {
@@ -101,6 +106,9 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isTasksOpen, setIsTasksOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
+  const [isTerminalOpen, setIsTerminalOpen] = useState<boolean>(false);
+  const [terminalInfo, setTerminalInfo] = useState<TerminalInfo | null>(null);
+  const [deviceType] = useState<DeviceType>(() => detectDeviceType());
   const [showIntro, setShowIntro] = useState<boolean>(() => {
     try {
       return sessionStorage.getItem('beatrice_intro_done') !== '1';
@@ -535,6 +543,7 @@ export default function App() {
               userDisplayName: userRef.current?.displayName || 'Boss',
               uid: user?.uid || null,
               email: user?.email || null,
+              deviceType,
             },
           })
         );
@@ -881,6 +890,10 @@ export default function App() {
             ]);
             setStatus('error');
             break;
+
+          case 'terminalOpen':
+            handleTerminalOpen(msg);
+            break;
         }
       } catch (err) {
         console.error('WS parse error:', err);
@@ -1096,6 +1109,7 @@ export default function App() {
             userDisplayName: userRef.current?.displayName || 'Boss',
             uid: user?.uid || null,
             email: user?.email || null,
+            deviceType,
           },
         })
       );
@@ -1112,6 +1126,32 @@ export default function App() {
     }
     connectWebSocket();
   }, [connectWebSocket]);
+
+  // Local terminal: fetch SSH info (for Termius on mobile) and open the modal.
+  const openLocalTerminal = useCallback(async () => {
+    try {
+      const res = await fetch('/api/terminal/info');
+      if (res.ok) {
+        const info: TerminalInfo = await res.json();
+        setTerminalInfo(info);
+      }
+    } catch {
+      // fall back to whatever terminalInfo we already have (or null)
+    }
+    setIsTerminalOpen(true);
+  }, []);
+
+  const handleTerminalOpen = useCallback((msg: { sshUrl?: string; host?: string; port?: number; user?: string }) => {
+    if (msg.sshUrl) {
+      setTerminalInfo({
+        host: msg.host || '',
+        port: msg.port || 22,
+        user: msg.user || 'root',
+        sshUrl: msg.sshUrl,
+      });
+    }
+    setIsTerminalOpen(true);
+  }, []);
 
   // Video Streaming Handlers
   const handleStartCamera = async (videoElem: HTMLVideoElement, overrideFacingMode?: CameraFacingMode) => {
@@ -1646,31 +1686,44 @@ export default function App() {
             </p>
           </div>
 
-          {user ? (
-            <img
-              src={user.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=100&q=80'}
-              alt={user.displayName || 'User Profile'}
-              onClick={() => {
-                triggerHaptic(10);
-                setIsProfileOpen(true);
-              }}
-              className="w-11 h-11 rounded-full object-cover border-2 border-white/10 cursor-pointer transition-transform duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90"
-              draggable={false}
-              title="View User Profile"
-            />
-          ) : (
+          <div className="flex items-center gap-2">
             <button
               onClick={() => {
                 triggerHaptic(10);
-                setIsProfileOpen(true);
+                openLocalTerminal();
               }}
-              className="w-11 h-11 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/10 flex items-center justify-center text-[#8e8e93] transition-all active:scale-90 cursor-pointer"
-              aria-label="User Profile"
-              title="View User Profile"
+              className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-white/15 cursor-pointer"
+              aria-label="Local Terminal"
+              title="Open Local Terminal"
             >
-              <UserIcon className="w-5 h-5" />
+              <TerminalIcon className="w-5 h-5" strokeWidth={2.5} />
             </button>
-          )}
+            {user ? (
+              <img
+                src={user.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=100&q=80'}
+                alt={user.displayName || 'User Profile'}
+                onClick={() => {
+                  triggerHaptic(10);
+                  setIsProfileOpen(true);
+                }}
+                className="w-11 h-11 rounded-full object-cover border-2 border-white/10 cursor-pointer transition-transform duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90"
+                draggable={false}
+                title="View User Profile"
+              />
+            ) : (
+              <button
+                onClick={() => {
+                  triggerHaptic(10);
+                  setIsProfileOpen(true);
+                }}
+                className="w-11 h-11 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/10 flex items-center justify-center text-[#8e8e93] transition-all active:scale-90 cursor-pointer"
+                aria-label="User Profile"
+                title="View User Profile"
+              >
+                <UserIcon className="w-5 h-5" />
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Main AI Orb Visualization */}
@@ -1896,6 +1949,14 @@ export default function App() {
         onCompressContext={handleCompressContext}
         onClearMemory={handleClearMemory}
         isCompressing={isCompressingMemory}
+      />
+
+      {/* Local Terminal (in-browser shell on desktop, Termius SSH on mobile) */}
+      <LocalTerminal
+        isOpen={isTerminalOpen}
+        onClose={() => setIsTerminalOpen(false)}
+        deviceType={deviceType}
+        sshInfo={terminalInfo}
       />
 
         </>
