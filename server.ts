@@ -96,6 +96,10 @@ import {
   pairWhatsAppWithQr,
   cancelWhatsAppPairing,
   logoutWhatsApp,
+  resetWhatsApp,
+  setWhatsAppUser,
+  setBossMode,
+  getBossMode,
   approveWhatsAppSend,
   setWhatsAppBroadcaster,
   removeWhatsAppBroadcaster,
@@ -1052,6 +1056,33 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
+// ===== Authentication Middleware =====
+function authMiddleware(req: any, res: any, next: any) {
+  const authHeader = req.headers['authorization'] || '';
+  const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const serviceId = req.headers['x-tdai-service-id'] || '';
+  
+  // Validate against environment variables
+  const validApiKey = process.env.TDAI_LLM_API_KEY;
+  const validServiceIds = [process.env.TDAI_LLM_SERVICE_ID || 'beatrice-memory'];
+  
+  // Check API key
+  if (!apiKey || apiKey !== validApiKey) {
+    res.status(401).json({ error: 'Invalid or missing API key' });
+    return;
+  }
+  
+  // Check service ID
+  if (!serviceId || !validServiceIds.includes(serviceId)) {
+    res.status(401).json({ error: 'Invalid or missing service ID' });
+    return;
+  }
+  
+  next();
+}
+
+// ===========================================
+
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
 
@@ -1189,16 +1220,39 @@ async function startServer() {
     }
   });
 
-  app.get('/api/whatsapp/status', (req, res) => {
-    res.json(getWhatsAppStatus());
+  // Extract the signed-in Firebase user from WhatsApp API calls (the client
+  // sends these headers from useAuth()) and bind the WhatsApp session to them,
+  // so every account gets its own pairing/auth/store.
+  const waUserFromReq = (req: any) => {
+    const uid = String(req.headers['x-wa-uid'] || req.query?.uid || '').trim();
+    const email = String(req.headers['x-wa-email'] || req.query?.email || '').trim() || null;
+    return { uid, email };
+  };
+
+  app.get('/api/whatsapp/status', async (req, res) => {
+    try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
+      res.json(getWhatsAppStatus());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  app.get('/api/whatsapp/capabilities', (req, res) => {
-    res.json(getWhatsAppCapabilities());
+  app.get('/api/whatsapp/capabilities', async (req, res) => {
+    try {
+      const { uid } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid);
+      res.json(getWhatsAppCapabilities());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post('/api/whatsapp/pair', async (req, res) => {
     try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
       const { phone } = req.body || {};
       const result = await pairWhatsApp(String(phone || ''));
       if (!result.ok) {
@@ -1213,6 +1267,8 @@ async function startServer() {
 
   app.post('/api/whatsapp/pair-qr', async (req, res) => {
     try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
       res.json(await pairWhatsAppWithQr());
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1221,6 +1277,8 @@ async function startServer() {
 
   app.post('/api/whatsapp/cancel', async (req, res) => {
     try {
+      const { uid } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid);
       res.json(await cancelWhatsAppPairing());
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1229,14 +1287,31 @@ async function startServer() {
 
   app.post('/api/whatsapp/logout', async (req, res) => {
     try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
       res.json(await logoutWhatsApp());
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/whatsapp/approve', (req, res) => {
+  // Hard reset: removes ALL WhatsApp auth state + persisted store so a fresh
+  // integration can be added. Works even when the session is stuck (e.g. a
+  // 403-banned socket that never opens), which logout cannot recover from.
+  app.post('/api/whatsapp/reset', async (req, res) => {
     try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
+      res.json(await resetWhatsApp());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/whatsapp/approve', async (req, res) => {
+    try {
+      const { uid } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid);
       const { id, approve, recipient } = req.body || {};
       const done = approveWhatsAppSend(id ? String(id) : null, !!approve, recipient ? String(recipient) : undefined);
       if (!done) {
@@ -1244,6 +1319,27 @@ async function startServer() {
         return;
       }
       res.json({ ok: true, approved: !!approve });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/whatsapp/boss-mode', async (req, res) => {
+    try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
+      res.json({ bossMode: getBossMode() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/whatsapp/boss-mode', async (req, res) => {
+    try {
+      const { uid, email } = waUserFromReq(req);
+      if (uid) await setWhatsAppUser(uid, email);
+      const enabled = !!(req.body || {}).enabled;
+      res.json({ bossMode: setBossMode(enabled) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1391,7 +1487,8 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
     let liveStarting = false;
     let clientClosed = false;
     let liveRetryCount = 0;
-    const MAX_LIVE_AUTO_RETRIES = 5;
+    // Never give up on the Live session: retry forever with capped backoff so
+    // the voice link self-heals instead of stopping and asking for a manual tap.
     let intentionalLiveClose = false;
 
     const broadcastToClient = (msg: unknown) => {
@@ -1400,21 +1497,13 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
       }
     };
 
-    setWhatsAppBroadcaster(broadcastToClient);
+    setWhatsAppBroadcaster(null, broadcastToClient);
 
     clientWs.send(JSON.stringify({ type: 'status', status: 'connecting' }));
 
     const startLiveSession = async (reason: string) => {
       if (clientClosed || liveStarting) return;
       if (liveSession && isConnected) return;
-      if (reason.startsWith('auto-retry') && liveRetryCount >= MAX_LIVE_AUTO_RETRIES) {
-        broadcastToClient({
-          type: 'error',
-          message: 'Live voice kept dropping. Tap Reconnect Beatrice — your language and chat memory are still saved.',
-        });
-        broadcastToClient({ type: 'status', status: 'error' });
-        return;
-      }
       if (reason.startsWith('auto-retry')) liveRetryCount += 1;
       else liveRetryCount = 0;
       liveStarting = true;
@@ -1514,6 +1603,16 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                 const toolCtx = { ai, broadcast: broadcastToClient };
 
                 try {
+                  // WhatsApp tools act on the session currently bound to this
+                  // module — re-bind it to THIS connection's user first so an
+                  // unrelated request (e.g. another user's status poll) can
+                  // never redirect a tool call onto a different account's
+                  // socket/store.
+                  if (name.includes('whatsapp')) {
+                    const waUid = (sessionBootstrap?.uid || '').trim();
+                    const waEmail = sessionBootstrap?.email || null;
+                    if (waUid) await setWhatsAppUser(waUid, waEmail);
+                  }
                   if (name === 'executeCodeSandbox') {
                     toolResult = await handleExecuteCodeSandbox(
                       args as { code: string; language: string; description?: string },
@@ -1782,6 +1881,14 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
         if (msg.type === 'sessionBootstrap') {
           sessionBootstrap = msg.bootstrap || msg;
           clearTimeout(bootstrapTimer);
+          // Bind the WhatsApp session to this connection's Firebase user so
+          // each account sees only its own pairing/state/store.
+          const waUid = (msg.bootstrap?.uid || msg.uid || '').trim();
+          const waEmail = msg.bootstrap?.email || msg.email || null;
+          if (waUid) {
+            await setWhatsAppUser(waUid, waEmail);
+            setWhatsAppBroadcaster(waUid, broadcastToClient);
+          }
           await startLiveSession('client-bootstrap');
           return;
         }
@@ -1943,7 +2050,8 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
       console.log('Client WebSocket closed.');
       clientClosed = true;
       clearTimeout(bootstrapTimer);
-      removeWhatsAppBroadcaster(broadcastToClient);
+      removeWhatsAppBroadcaster(sessionBootstrap?.uid || null, broadcastToClient);
+      removeWhatsAppBroadcaster(null, broadcastToClient);
       if (liveSession) {
         intentionalLiveClose = true;
         try {
@@ -2005,8 +2113,27 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    // Hashed build assets (dist/assets/*) are immutable — cache them hard.
+    app.use(
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        immutable: true,
+        maxAge: '365d',
+      })
+    );
+    app.use(
+      express.static(distPath, {
+        // index.html must never be cached: it references hashed assets, so a
+        // stale copy makes clients load the old bundle after every deploy.
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html')) {
+            res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (req, res) => {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

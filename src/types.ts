@@ -183,6 +183,8 @@ export interface SessionBootstrap {
   recentTurns?: { role: 'user' | 'model' | 'system'; text: string; timestamp: number }[];
   lastInteractionAt?: number;
   userDisplayName?: string;
+  uid?: string | null;
+  email?: string | null;
 }
 
 export type WsClientMessage =
@@ -225,7 +227,7 @@ export type WsServerMessage =
   | { type: 'computerUpdate'; sessionId: string; event: string; done: boolean; [key: string]: unknown }
   | { type: 'codingAgentUpdate'; session: CodingAgentSession }
   | { type: 'codingAgentStream'; sessionId: string; chunk: string; done: boolean; error?: string }
-  | { type: 'whatsappStatus'; status: string; connected: boolean; pairingCode?: string | null; qrDataUrl?: string | null; error?: string | null; reconnectAttempt?: number; profile?: { name: string | null; phone: string | null; avatarUrl: string | null } | null; bossMode?: boolean }
+  | { type: 'whatsappStatus'; status: string; connected: boolean; pairingCode?: string | null; qrDataUrl?: string | null; error?: string | null; reconnectAttempt?: number; profile?: { name: string | null; phone: string | null; avatarUrl: string | null } | null; bossMode?: boolean; uid?: string | null; email?: string | null }
   | { type: 'whatsappApprovalRequest'; id: string; recipient: string; recipientName?: string; purpose?: string }
   | { type: 'whatsappIncomingMessages'; messages: { id?: string; chatJid?: string; chatName?: string; fromMe?: boolean; sender?: string; timestamp?: number | null; type?: string; text?: string }[] }
   | { type: 'error'; message: string };

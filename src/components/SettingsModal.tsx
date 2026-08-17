@@ -28,6 +28,7 @@ interface SettingsModalProps {
   onQrPairWhatsApp?: () => void;
   onCancelWhatsAppPairing?: () => void;
   onLogoutWhatsApp?: () => void;
+  onResetWhatsApp?: () => void;
   onToggleWhatsAppBossMode?: (enabled: boolean) => void;
 }
 
@@ -109,6 +110,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onQrPairWhatsApp,
   onCancelWhatsAppPairing,
   onLogoutWhatsApp,
+  onResetWhatsApp,
   onToggleWhatsAppBossMode,
 }) => {
   const { user, signInWithGoogle, logout } = useAuth();
@@ -533,6 +535,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onQr={onQrPairWhatsApp}
                 onCancel={onCancelWhatsAppPairing || (() => {})}
                 onLogout={onLogoutWhatsApp || (() => {})}
+                onReset={onResetWhatsApp || (() => {})}
                 onToggleBossMode={onToggleWhatsAppBossMode}
               />
             </div>

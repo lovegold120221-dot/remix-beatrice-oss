@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Check, Copy, Crown, MessageCircle, Phone, QrCode, Unplug, User } from 'lucide-react';
 
 export interface WhatsAppProfile {
@@ -16,6 +16,8 @@ export interface WhatsAppPanelState {
   reconnectAttempt?: number;
   profile?: WhatsAppProfile | null;
   bossMode?: boolean;
+  uid?: string | null;
+  email?: string | null;
 }
 
 export interface WhatsAppApprovalState {
@@ -78,6 +80,7 @@ interface WhatsAppLinkCardProps {
   onQr: () => void;
   onCancel: () => void;
   onLogout: () => void;
+  onReset: () => void;
   onToggleBossMode?: (enabled: boolean) => void;
 }
 
@@ -93,11 +96,25 @@ const statusMeta = (s: WhatsAppPanelState) => {
   return { dot: 'bg-[#48484a]', label: 'Not linked', pulse: false };
 };
 
-export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onToggleBossMode }: WhatsAppLinkCardProps) {
+export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onReset, onToggleBossMode }: WhatsAppLinkCardProps) {
   const [mode, setMode] = useState<'qr' | 'code'>('qr');
   const [phone, setPhone] = useState('');
   const [copied, setCopied] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [userStopped, setUserStopped] = useState(false);
   const meta = statusMeta(status);
+
+  // WhatsApp-Web-style pairing: the QR code starts generating automatically
+  // the moment the card opens (no "Show QR code" tap needed). Any phone can
+  // scan it from WhatsApp → Linked devices → Link a device.
+  useEffect(() => {
+    if (userStopped) return;
+    if (status.connected || status.pairingCode || status.qrDataUrl) return;
+    if (status.status === 'connecting' || status.status === 'pairing') return;
+    const t = setTimeout(() => onQr(), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status.connected, status.pairingCode, status.qrDataUrl, status.status, userStopped]);
 
   const copyCode = async () => {
     if (!status.pairingCode) return;
@@ -145,6 +162,15 @@ export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onT
 
         {status.connected && (
           <>
+            {status.email && (
+              <div className="flex items-center gap-2 rounded-2xl bg-black/40 border border-white/5 px-3 py-2">
+                <User className="w-3.5 h-3.5 text-[#8e8e93]" strokeWidth={2.2} />
+                <span className="text-[0.7rem] text-[#8e8e93] truncate">
+                  Linked to account{' '}
+                  <span className="text-white/90 font-medium">{status.email}</span>
+                </span>
+              </div>
+            )}
             {status.profile && (
               <div className="flex items-center gap-3 rounded-2xl bg-black/40 border border-white/5 p-3">
                 {status.profile.avatarUrl ? (
@@ -273,7 +299,10 @@ export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onT
                     </p>
                     <button
                       type="button"
-                      onClick={onCancel}
+                      onClick={() => {
+                        setUserStopped(true);
+                        onCancel();
+                      }}
                       className="w-full rounded-xl bg-white/5 border border-white/10 text-white py-2 text-[11px] font-semibold active:scale-95 transition-transform cursor-pointer"
                     >
                       Cancel
@@ -282,7 +311,10 @@ export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onT
                 ) : (
                   <button
                     type="button"
-                    onClick={onQr}
+                    onClick={() => {
+                      setUserStopped(false);
+                      onQr();
+                    }}
                     className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#00f2fe] text-black py-2.5 text-xs font-semibold active:scale-95 transition-transform cursor-pointer"
                   >
                     <QrCode className="w-4 h-4" strokeWidth={2.5} />
@@ -316,7 +348,10 @@ export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onT
                     <p className="text-[0.65rem] text-amber-400/80 animate-pulse">Waiting for the phone to link…</p>
                     <button
                       type="button"
-                      onClick={onCancel}
+                      onClick={() => {
+                        setUserStopped(true);
+                        onCancel();
+                      }}
                       className="w-full rounded-xl bg-white/5 border border-white/10 text-white py-2 text-[11px] font-semibold active:scale-95 transition-transform cursor-pointer"
                     >
                       Cancel
@@ -353,6 +388,34 @@ export function WhatsAppLinkCard({ status, onPair, onQr, onCancel, onLogout, onT
             )}
           </>
         )}
+
+        {/* Danger zone — always available so a stuck/banned session can be cleared */}
+        <div className="pt-2 border-t border-white/[0.07]">
+          <button
+            type="button"
+            onClick={() => {
+              if (confirmReset) {
+                setConfirmReset(false);
+                onReset();
+              } else {
+                setConfirmReset(true);
+                setTimeout(() => setConfirmReset(false), 4000);
+              }
+            }}
+            className={`w-full flex items-center justify-center gap-1.5 rounded-xl border py-2 text-[11px] font-semibold active:scale-95 transition-colors cursor-pointer ${
+              confirmReset
+                ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                : 'bg-rose-500/5 border-rose-500/20 text-rose-400/80 hover:bg-rose-500/10'
+            }`}
+          >
+            <Unplug className="w-3 h-3" />
+            {confirmReset ? 'Tap again to confirm — clears all WhatsApp data' : 'Clear & re-link (remove WhatsApp data)'}
+          </button>
+          <p className="text-[0.6rem] text-[#8e8e93] leading-snug mt-1.5">
+            Removes the saved WhatsApp login and stored chats/contacts so you can link a new account. Use
+            this if linking is stuck or the session is restricted.
+          </p>
+        </div>
       </div>
     </div>
   );

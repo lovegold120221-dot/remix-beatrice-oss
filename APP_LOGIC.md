@@ -72,10 +72,11 @@ flowchart TD
     B -->|runCliCommand| D[handleRunCliCommand]
     B -->|deployAgentTask / runCodingAgent| E[spawn sub-agent / OpenCode CLI]
     B -->|getWeather / webSearch / getSystemInfo| F[lightweight handlers]
-    B -->|qwen* / generateVideo| G[QwenCloud + DashScope REST]
+    B -->|qwen* / generateVideo| G["QwenCloud + DashScope REST<br/>only on explicit request"]
     B -->|runBrowserAutomation / runComputerControl| H[browser :5558 / computer :5559]
     B -->|33x Google tools| I[googleWorkspace.ts]
     B -->|18x whatsapp_* tools| J[whatsapp-tools.ts Baileys]
+    B -->|remember_memory / recall_memory / get_core_memory| K2[MemoryCore gateway :8420]
     B -->|updateCanvasVisual| K[canvas card to SPA]
     B -->|unknown| L[error: Unknown tool name]
     C --> M[wrap result + sendToolResponse back to Live]
@@ -86,6 +87,7 @@ flowchart TD
     H --> M
     I --> M
     J --> M
+    K2 --> M
     K --> M
     L --> M
 ```
@@ -154,7 +156,7 @@ flowchart TD
     D -->|yes| E[retry startLiveSession auto-retry<br/>max 5]
     E -->|retries exhausted| F[error toast: tap Reconnect Beatrice<br/>language + memory preserved]
     E -->|ok| B
-    B -->|onclose intentional (prefs update)| G[no retry, session replaced]
+    B -->|"onclose intentional (prefs update)"| G[no retry, session replaced]
     B -->|onclose unexpected| D
     D -->|no client WS closed| H[cleanup: close Live, remove broadcasters]
 ```
@@ -187,3 +189,77 @@ The same handlers are reachable without Gemini: the SPA sends `runSandbox`, `run
 | `GET /api/workspace/gmail/messages` · `/api/workspace/contacts` · `POST /api/workspace/gmail/send` · `/api/workspace/forms/create` · `GET /api/workspace/forms/list` | Google Workspace over REST |
 | `GET /api/whatsapp/status` · `/capabilities` | WhatsApp health |
 | `POST /api/whatsapp/pair` · `/pair-qr` · `/cancel` · `/logout` · `/approve` | WhatsApp lifecycle |
+| `GET /api/sandbox/preview/:file` | proxy sandbox HTML previews (frontend iframe) |
+| `GET /privacy` · `/terms` | public static pages (no auth) |
+
+## 9. Memory learning (MemoryCore)
+
+Beatrice saves and recalls conversations via the local MemoryCore gateway (`127.0.0.1:8420`, auth via `TDAI_LLM_API_KEY` / `TDAI_LLM_SERVICE_ID`).
+
+```mermaid
+flowchart LR
+    U[Boss says something important] --> R[remember_memory tool]
+    R --> ADD[POST /v2/conversation/add]
+    ADD --> L0[(L0 conversation store)]
+    Q[Boss asks about the past] --> RC[recall_memory tool]
+    RC --> SRCH[POST /v2/conversation/search<br/>BM25 keyword search]
+    SRCH --> L0
+    SRCH --> HITS[ranked matches + relevance scores]
+    HITS --> SPOKEN[Beatrice answers grounded in memory]
+    CORE[Boss context] --> C[get_core_memory tool]
+    C --> CR[POST /v2/core/read<br/>L3 persona/core profile]
+    CR --> INJ[injected into system prompt on WS connect]
+```
+
+## 10. WhatsApp lifecycle, Boss Mode & shutdown
+
+```mermaid
+flowchart TD
+    A[initWhatsAppSession] --> B[loadStoreFromRTDB<br/>restore persisted chats/messages]
+    B --> C{creds.json exists?}
+    C -->|no| D[pairing flow<br/>waitForSocketOpen -> requestPairingCode]
+    D --> E[QR / pairing code to Boss]
+    C -->|yes| F[connectSocket]
+    F --> G{connection.upsert}
+    G -->|open| H[linked + streaming events]
+    H --> I[schedulePersist debounced 4s<br/>RTDB + local file]
+    H --> J[maybeAutoReply when Boss Mode ON<br/>gemini-2.5-flash, 400 chars, 60s cooldown]
+    G -->|close unexpected| K["sock = null (drop dead ref)"]
+    K --> L[reconnect timer backoff<br/>BASE * 2^attempt + jitter, capped]
+    L --> F
+    F -->|pairing timeout 20s| M[state failed -> try again]
+    H --> N[SIGTERM/SIGINT]
+    N --> O["flushStoreOnShutdown<br/>persistStore then exit (5s bound)"]
+```
+
+Boss Mode details: when ON, `maybeAutoReply` auto-replies to incoming DMs (`@s.whatsapp.net`, skips own/`3A`-broadcast/stub msgs) using Gemini `gemini-2.5-flash` (`getLocalGemini` lazy import), mimicking the Boss's style from `getWhatsAppKnowledgeBase(force)` (contacts + style + recent conversations, 5-min cache). Max 400 chars, 60s cooldown per chat, marks read. Toggle via `set_whatsapp_boss_mode` tool or `GET/POST /api/whatsapp/boss-mode`; persisted in `data/whatsapp-auth/.meta.json`.
+
+Shutdown: `SIGTERM`/`SIGINT` → `flushStoreOnShutdown` clears reconnect/heartbeat/persist timers and calls `persistStore()` before exit (5s bound), so the newest messages aren't dropped by the 4s debounce during restarts.
+
+## 11. Deployment flow
+
+```mermaid
+flowchart TD
+    A[npm install] --> B[npm run build<br/>vite build + esbuild -> dist/server.cjs]
+    B --> C{install-server.sh?}
+    C -->|full| D[apt toolchain: build-essential python3 ffmpeg<br/>libxtst-dev libpng-dev for node-pty + robotjs]
+    C -->|skip-deps| E[npm install + build only]
+    D --> F[Playwright Chromium :5558 + OpenCode CLI :5560]
+    F --> G[".env.local from .env.example<br/>GEMINI_API_KEY required, not MY_GEMINI_API_KEY"]
+    G --> H[data dirs: whatsapp-auth, whatsapp-media,<br/>sandbox-previews, coding-agent-logs]
+    E --> H
+    D --> H
+    H --> I{INSTALL_SYSTEMD=1?}
+    I -->|yes| J[beatrice-oss.service systemd unit<br/>/usr/bin/node dist/server.cjs, Restart=always]
+    I -->|no| K[run manually: NODE_ENV=production PORT=5555<br/>APP_URL=https://oss.eburon.ai node dist/server.cjs]
+    J --> L[daemon-reload + systemctl restart]
+    K --> L
+    L --> M[Node :5555 plain HTTP]
+    M --> N[Caddy reverse_proxy 127.0.0.1:5555<br/>auto Let's Encrypt on :443]
+    M --> O[Nginx + certbot alternative<br/>X-Forwarded-Proto + Upgrade/Connection headers]
+    N --> P[HTTPS clients + /live WebSocket]
+    O --> P
+    P --> Q[Verify: /api/health, /api/services,<br/>speak to see status: connected -> speaking]
+```
+
+Deployment notes: never run two instances per host (fixed ports 5556–5560 clash); the proxy must forward `Upgrade`/`Connection` headers or `/live` fails; WhatsApp pairing, Google connect, and `opencode auth login` are interactive one-time steps. See `DEPLOYMENT.md` for the full guide.

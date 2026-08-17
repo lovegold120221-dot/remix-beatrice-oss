@@ -1048,11 +1048,29 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                 >
                   List Apps
                 </button>
-                <button
+<button
                   onClick={() => onRunComputer?.('openApp', { app: 'xterm' })}
                   className="px-2 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-semibold"
                 >
                   Open xterm
+                </button>
+                <button
+                  onClick={() => onRunComputer?.('mouseMove', { x: 100, y: 100 })}
+                  className="px-2 py-1.5 rounded-lg bg-[#00f2fe]/20 hover:bg-[#00f2fe]/30 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold"
+                >
+                  Move Mouse
+                </button>
+                <button
+                  onClick={() => onRunComputer?.('mouseClick', { button: 1 })}
+                  className="px-2 py-1.5 rounded-lg bg-[#00f2fe]/20 hover:bg-[#00f2fe]/30 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold"
+                >
+                  Click
+                </button>
+                <button
+                  onClick={() => onRunComputer?.('typeText', { text: 'Hello Beatrice' })}
+                  className="px-2 py-1.5 rounded-lg bg-[#00f2fe]/20 hover:bg-[#00f2fe]/30 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold"
+                >
+                  Type Text
                 </button>
               </div>
             </div>

@@ -21,17 +21,221 @@ async function getBaileys() {
 
 import type { WASocket, WAMessage, AnyMessageContent } from '@whiskeysockets/baileys';
 
-const AUTH_DIR =
+const BASE_AUTH_DIR =
   process.env.WHATSAPP_AUTH_DIR || path.join(process.cwd(), 'data', 'whatsapp-auth');
 const MEDIA_DIR = path.join(process.cwd(), 'data', 'whatsapp-media');
 const AUTO_APPROVE = (process.env.WHATSAPP_SEND_AUTO_APPROVE ?? 'true') !== 'false';
 const MAX_MESSAGES_PER_CHAT = 300;
 const MAX_CONTEXT_MESSAGES = 8;
 
+// ---------------------------------------------------------------------------
+// Per-user session namespace
+// ---------------------------------------------------------------------------
+// Each signed-in Firebase account gets its own WhatsApp pairing, auth state,
+// chat store, and Boss Mode settings, keyed by a sanitized uid. The module
+// keeps ONE active socket at a time and switches namespaces when the current
+// user changes (setWhatsAppUser). When no user is set (server boot / legacy
+// paths) everything falls back to the original shared namespace so existing
+// behavior is preserved.
+let currentUser: { uid: string; email: string | null } | null = null;
+
+// Monotonic session epoch. Bumped on every user switch (setWhatsAppUser) so
+// async work started for the previous user (a connecting socket, a debounced
+// persist, an in-flight reconnect timer, a Gemini auto-reply) can detect it no
+// longer belongs to the active session and bail out. Without this, stale
+// callbacks from the old user's socket keep writing into the new user's store,
+// state, and RTDB doc.
+let sessionEpoch = 0;
+
+function sanitizeUid(uid: string | null | undefined): string {
+  return String(uid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+}
+
+function userKey(): string {
+  return currentUser ? sanitizeUid(currentUser.uid) : '';
+}
+
+function authDirFor(uidKey: string): string {
+  return uidKey ? path.join(BASE_AUTH_DIR, uidKey) : BASE_AUTH_DIR;
+}
+
+function metaFileFor(uidKey: string): string {
+  return path.join(authDirFor(uidKey), '.meta.json');
+}
+
+function localStoreFileFor(uidKey: string): string {
+  return uidKey
+    ? path.join(process.cwd(), 'data', `whatsapp-store-${uidKey}.json`)
+    : path.join(process.cwd(), 'data', 'whatsapp-store.json');
+}
+
+// RTDB doc names must avoid ".", "#", "$", "/", "[", "]" — sanitized uid is safe.
+function storeDocFor(uidKey: string): string {
+  return uidKey ? `whatsapp_${uidKey}` : 'whatsapp_main';
+}
+
+// Switch the active session to the given Firebase user. Tears down the previous
+// user's socket (persisting first), loads the new user's store from RTDB/local
+// file, and reconnects if that user has saved credentials. Safe to call
+// repeatedly with the same uid — it just refreshes the email.
+export async function setWhatsAppUser(uid: string | null | undefined, email?: string | null): Promise<void> {
+  const clean = sanitizeUid(uid);
+  // Cancel any debounced persist so it cannot fire mid-switch and write the
+  // previous user's store under the next user's key (or vice versa).
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (!clean) {
+    // No identity supplied — stay on the legacy/shared namespace.
+    if (currentUser) {
+      // Invalidate the old session's async paths BEFORE tearing it down so its
+      // close/creds events are guaranteed stale and cannot touch new state.
+      sessionEpoch += 1;
+      await stopCurrentSocket('cancel');
+      clearPerUserCaches();
+      waStore.chats.clear();
+      waStore.contacts.clear();
+      waStore.messages.clear();
+      waStore.calls.length = 0;
+      currentUser = null;
+      bossMode = false;
+      setState('disconnected');
+    }
+    return;
+  }
+  if (currentUser && currentUser.uid === clean) {
+    // Refresh email only when a non-empty value is provided; keep the stored
+    // email otherwise (requests often omit the email header).
+    if (email && email !== currentUser.email) currentUser.email = email;
+    return;
+  }
+  // Persist the previous user's store before switching namespaces.
+  if (currentUser) {
+    // Invalidate the old session's async paths BEFORE tearing it down so its
+    // close/creds events are guaranteed stale and cannot touch new state.
+    sessionEpoch += 1;
+    await stopCurrentSocket('cancel');
+    try {
+      await persistStore();
+    } catch {
+      // best effort
+    }
+    waStore.chats.clear();
+    waStore.contacts.clear();
+    waStore.messages.clear();
+    waStore.calls.length = 0;
+  }
+  sessionEpoch += 1;
+  clearPerUserCaches();
+  ensureDirs();
+  // Boss Mode and the linked email are per-user — restore from THIS user's
+  // meta (readMeta() would target the previous user, so read the file directly).
+  let savedMeta: { bossMode?: boolean; email?: string | null } = {};
+  try {
+    savedMeta = JSON.parse(fs.readFileSync(metaFileFor(clean), 'utf8')) || {};
+  } catch {
+    // no meta yet
+  }
+  bossMode = !!savedMeta.bossMode;
+  currentUser = { uid: clean, email: email || savedMeta.email || null };
+  ensureDirs();
+  await loadStoreFromRTDB();
+  let hasCreds = fs.existsSync(path.join(authDirFor(clean), 'creds.json'));
+  // One-time migration for sessions linked before the per-user refactor: the
+  // legacy shared namespace still holds the creds + store. Claim them for this
+  // user (move auth dir + RTDB/local store into their namespace) so the linked
+  // phone does not silently disappear and has to be re-paired.
+  if (!hasCreds) {
+    hasCreds = await claimLegacySession(clean);
+  }
+  if (hasCreds) {
+    setState('disconnected', { error: null });
+    await connectSocket();
+  } else {
+    setState('disconnected', {
+      error: 'No WhatsApp credentials yet for this account. Link from Settings > Connect WhatsApp.',
+    });
+  }
+}
+
+// Per-user mutable state that must never leak across a user switch.
+function clearPerUserCaches() {
+  pendingApprovals.clear();
+  approvedRecipients.clear();
+  autoReplyCooldowns.clear();
+  autoReplyInFlight.clear();
+  kbCache = null;
+}
+
+// Move the pre-refactor shared namespace (creds + auth state + store) into this
+// user's namespace so their existing linked WhatsApp session survives. Returns
+// true when credentials now exist for the user.
+async function claimLegacySession(uidKey: string): Promise<boolean> {
+  const sharedCreds = path.join(BASE_AUTH_DIR, 'creds.json');
+  if (!fs.existsSync(sharedCreds)) return false;
+  try {
+    const sharedMeta = JSON.parse(fs.readFileSync(path.join(BASE_AUTH_DIR, '.meta.json'), 'utf8')) || {};
+    if (sharedMeta.claimedBy) return false;
+    // Move the whole shared auth dir (creds, signal keys, app-state sync...).
+    // Only files: existing per-user subdirectories must be left untouched.
+    for (const f of fs.readdirSync(BASE_AUTH_DIR)) {
+      if (f === '.meta.json') continue;
+      const from = path.join(BASE_AUTH_DIR, f);
+      if (!fs.statSync(from).isFile()) continue;
+      const to = path.join(authDirFor(uidKey), f);
+      if (!fs.existsSync(to)) fs.renameSync(from, to);
+    }
+    // Tombstone the shared namespace so a later user (or a dying shared
+    // socket's saveCreds) cannot resurrect the legacy session.
+    fs.writeFileSync(
+      path.join(BASE_AUTH_DIR, '.meta.json'),
+      JSON.stringify({ connectedOnce: false, claimedBy: uidKey })
+    );
+    // Claim the shared store (RTDB doc + local file) if the user has none yet.
+    if (fs.existsSync(localStoreFileFor(''))) {
+      fs.renameSync(localStoreFileFor(''), localStoreFileFor(uidKey));
+    }
+    try {
+      const db = await initRTDB();
+      if (db) {
+        const snap = await db.ref(`${STORE_COLLECTION}/whatsapp_main`).get();
+        if (snap.exists()) {
+          await db.ref(`${STORE_COLLECTION}/${storeDocFor(uidKey)}`).set(snap.val());
+          await db.ref(`${STORE_COLLECTION}/whatsapp_main`).remove();
+        }
+      }
+    } catch {
+      // best effort — the local file copy above still carries the store
+    }
+    await loadStoreFromRTDB();
+    writeMeta({ connectedOnce: true, bossMode: !!sharedMeta.bossMode });
+    console.log(`[WhatsApp] Claimed legacy shared session for user ${uidKey}`);
+    return fs.existsSync(path.join(authDirFor(uidKey), 'creds.json'));
+  } catch (err: any) {
+    console.error('[WhatsApp] Legacy session claim failed:', err?.message || err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+
 let sock: WASocket | null = null;
-const broadcastFns: Set<(msg: unknown) => void> = new Set();
+// Broadcast receivers are registered per-user so a user only sees their own
+// WhatsApp session's events. Key '' = shared/legacy (no uid) receivers.
+const broadcastFns: Map<string, Set<(msg: unknown) => void>> = new Map();
 function broadcast(msg: unknown) {
-  for (const fn of broadcastFns) fn(msg);
+  const key = userKey();
+  const targets = new Set<(msg: unknown) => void>([...(broadcastFns.get(key) || [])]);
+  // No active user -> include the shared receivers too (pre-bootstrap clients).
+  if (!key) for (const fn of broadcastFns.get('') || []) targets.add(fn);
+  for (const fn of targets) {
+    try {
+      fn(msg);
+    } catch {
+      // ignore per-receiver failures
+    }
+  }
 }
 let connectionState: 'disconnected' | 'connecting' | 'pairing' | 'connected' | 'failed' | 'logged_out' =
   'disconnected';
@@ -54,9 +258,6 @@ const PAIRING_TIMEOUT_MS = 120_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const STORE_COLLECTION = 'whatsapp_store';
-const STORE_DOC = 'whatsapp_main';
-const META_FILE = path.join(AUTH_DIR, '.meta.json');
-const LOCAL_STORE_FILE = path.join(process.cwd(), 'data', 'whatsapp-store.json');
 
 interface ChatRecord {
   jid: string;
@@ -95,13 +296,29 @@ const approvedRecipients = new Map<string, number>();
 const pendingApprovals = new Map<string, { resolve: (approved: boolean) => void }>();
 
 function ensureDirs() {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  fs.mkdirSync(authDirFor(userKey()), { recursive: true });
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-function readMeta(): { connectedOnce?: boolean; bossMode?: boolean } {
+function withTimeout<T>(ms: number, promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
+function readMeta(): { connectedOnce?: boolean; bossMode?: boolean; uid?: string; email?: string | null } {
   try {
-    return JSON.parse(fs.readFileSync(META_FILE, 'utf8')) || {};
+    return JSON.parse(fs.readFileSync(metaFileFor(userKey()), 'utf8')) || {};
   } catch {
     return {};
   }
@@ -109,7 +326,11 @@ function readMeta(): { connectedOnce?: boolean; bossMode?: boolean } {
 
 function writeMeta(meta: { connectedOnce?: boolean; bossMode?: boolean }) {
   try {
-    fs.writeFileSync(META_FILE, JSON.stringify(meta));
+    const existing = readMeta();
+    fs.writeFileSync(
+      metaFileFor(userKey()),
+      JSON.stringify({ ...existing, ...meta, uid: currentUser?.uid || existing.uid || null, email: currentUser?.email ?? existing.email ?? null })
+    );
   } catch {
     // ignore
   }
@@ -117,9 +338,9 @@ function writeMeta(meta: { connectedOnce?: boolean; bossMode?: boolean }) {
 
 function purgeStaleAuth() {
   try {
-    for (const f of fs.readdirSync(AUTH_DIR)) {
+    for (const f of fs.readdirSync(authDirFor(userKey()))) {
       if (f === '.meta.json') continue;
-      fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
+      fs.rmSync(path.join(authDirFor(userKey()), f), { recursive: true, force: true });
     }
   } catch {
     // ignore
@@ -246,8 +467,13 @@ let persistTimer: NodeJS.Timeout | null = null;
 
 function schedulePersist() {
   if (persistTimer) return;
+  // Capture the epoch when the debounce is scheduled; if the user switches
+  // before it fires, the persist must not write the previous user's store
+  // into the new user's RTDB doc / local file.
+  const epoch = sessionEpoch;
   persistTimer = setTimeout(() => {
     persistTimer = null;
+    if (epoch !== sessionEpoch) return;
     persistStore().catch((err: any) =>
       console.error('[WhatsApp] persist failed:', err?.message || err)
     );
@@ -293,33 +519,37 @@ function decodeRTDBKey(key: string): string {
 
 async function persistStore() {
   const data = await serializeStore();
+  const doc = storeDocFor(userKey());
+  const localFile = localStoreFileFor(userKey());
   // Primary: Firebase RTDB
   try {
     const db = await initRTDB();
     if (db) {
-      await db.ref(`${STORE_COLLECTION}/${STORE_DOC}`).set(data);
+      await db.ref(`${STORE_COLLECTION}/${doc}`).set(data);
     }
   } catch (err: any) {
     console.error('[WhatsApp] RTDB persist failed:', err?.message || err);
   }
   // Fallback: local file
   try {
-    fs.writeFileSync(LOCAL_STORE_FILE, JSON.stringify(data));
+    fs.writeFileSync(localFile, JSON.stringify(data));
   } catch (err: any) {
     console.error('[WhatsApp] Local file persist failed:', err?.message || err);
   }
 }
 
 async function clearStoreInRTDB() {
+  const doc = storeDocFor(userKey());
+  const localFile = localStoreFileFor(userKey());
   try {
-    if (fs.existsSync(LOCAL_STORE_FILE)) fs.rmSync(LOCAL_STORE_FILE, { force: true });
+    if (fs.existsSync(localFile)) fs.rmSync(localFile, { force: true });
   } catch {
     // best effort
   }
   try {
     const db = await initRTDB();
     if (db) {
-      await db.ref(`${STORE_COLLECTION}/${STORE_DOC}`).remove();
+      await db.ref(`${STORE_COLLECTION}/${doc}`).remove();
     }
   } catch {
     // best effort
@@ -361,16 +591,18 @@ function applyStoreData(d: any) {
 }
 
 export async function loadStoreFromRTDB(): Promise<void> {
+  const doc = storeDocFor(userKey());
+  const localFile = localStoreFileFor(userKey());
   // Primary: Firebase RTDB
   try {
     const db = await initRTDB();
     if (db) {
-      const snap = await db.ref(`${STORE_COLLECTION}/${STORE_DOC}`).get();
+      const snap = await db.ref(`${STORE_COLLECTION}/${doc}`).get();
       if (snap.exists()) {
         const d = snap.val() || {};
         applyStoreData(d);
         console.log(
-          `[WhatsApp] Restored store from RTDB: ${waStore.chats.size} chats, ${waStore.contacts.size} contacts, ${waStore.messages.size} chats with messages`
+          `[WhatsApp] Restored store from RTDB (${userKey() || 'shared'}): ${waStore.chats.size} chats, ${waStore.contacts.size} contacts, ${waStore.messages.size} chats with messages`
         );
         return;
       }
@@ -380,11 +612,11 @@ export async function loadStoreFromRTDB(): Promise<void> {
   }
   // Fallback: local file
   try {
-    if (fs.existsSync(LOCAL_STORE_FILE)) {
-      const d = JSON.parse(fs.readFileSync(LOCAL_STORE_FILE, 'utf8'));
+    if (fs.existsSync(localFile)) {
+      const d = JSON.parse(fs.readFileSync(localFile, 'utf8'));
       applyStoreData(d);
       console.log(
-        `[WhatsApp] Restored store from local file: ${waStore.chats.size} chats, ${waStore.contacts.size} contacts, ${waStore.messages.size} chats with messages`
+        `[WhatsApp] Restored store from local file (${userKey() || 'shared'}): ${waStore.chats.size} chats, ${waStore.contacts.size} contacts, ${waStore.messages.size} chats with messages`
       );
       return;
     }
@@ -397,21 +629,27 @@ export async function loadStoreFromRTDB(): Promise<void> {
 // Session lifecycle
 // ---------------------------------------------------------------------------
 
+function statusPayload(): Record<string, unknown> {
+  return {
+    type: 'whatsappStatus',
+    uid: currentUser?.uid || null,
+    email: currentUser?.email || null,
+    status: connectionState,
+    connected: connectionState === 'connected',
+    pairingCode: connectionState === 'pairing' ? pairingCode : null,
+    qrDataUrl: connectionState === 'pairing' ? qrDataUrl : null,
+    error: lastError,
+    reconnectAttempt: connectionState === 'connecting' ? reconnectAttempt : 0,
+    profile: connectionState === 'connected' ? profile : null,
+    bossMode: connectionState === 'connected' ? bossMode : false,
+  };
+}
+
 function setState(state: typeof connectionState, extra?: { error?: string | null }) {
   connectionState = state;
   lastError = extra?.error ?? null;
   try {
-    broadcast({
-      type: 'whatsappStatus',
-      status: state,
-      connected: state === 'connected',
-      pairingCode: state === 'pairing' ? pairingCode : null,
-      qrDataUrl: state === 'pairing' ? qrDataUrl : null,
-      error: lastError,
-      reconnectAttempt: state === 'connecting' ? reconnectAttempt : 0,
-      profile: state === 'connected' ? profile : null,
-      bossMode: state === 'connected' ? bossMode : false,
-    });
+    broadcast(statusPayload());
   } catch {
     // no broadcast hook yet
   }
@@ -421,17 +659,7 @@ export function setBossMode(enabled: boolean): boolean {
   bossMode = !!enabled;
   writeMeta({ connectedOnce: readMeta().connectedOnce, bossMode });
   try {
-    broadcast({
-      type: 'whatsappStatus',
-      status: connectionState,
-      connected: connectionState === 'connected',
-      pairingCode: null,
-      qrDataUrl: null,
-      error: lastError,
-      reconnectAttempt: 0,
-      profile: connectionState === 'connected' ? profile : null,
-      bossMode,
-    });
+    broadcast(statusPayload());
   } catch {
     // no broadcast hook yet
   }
@@ -443,6 +671,7 @@ export function getBossMode(): boolean {
 }
 
 async function fetchProfile(s: WASocket) {
+  const epoch = sessionEpoch;
   try {
     const me = s.user;
     if (!me?.id) return;
@@ -453,28 +682,27 @@ async function fetchProfile(s: WASocket) {
     } catch {
       avatarUrl = null;
     }
+    // A user switch mid-fetch must not paint the old user's profile onto the
+    // new session.
+    if (epoch !== sessionEpoch || sock !== s) return;
     profile = { name: me.name || null, phone, avatarUrl };
-    broadcast({
-      type: 'whatsappStatus',
-      status: connectionState,
-      connected: connectionState === 'connected',
-      pairingCode: null,
-      qrDataUrl: null,
-      error: lastError,
-      reconnectAttempt: 0,
-      profile,
-      bossMode,
-    });
+    broadcast(statusPayload());
   } catch {
-    profile = null;
+    if (epoch === sessionEpoch) profile = null;
   }
 }
 
-export function setWhatsAppBroadcaster(fn: (msg: unknown) => void) {
-  broadcastFns.add(fn);
+export function setWhatsAppBroadcaster(uid: string | null | undefined, fn: (msg: unknown) => void) {
+  const key = sanitizeUid(uid);
+  const set = broadcastFns.get(key) || new Set<(msg: unknown) => void>();
+  set.add(fn);
+  broadcastFns.set(key, set);
+  // Immediately send the current snapshot so the client renders the right state.
   try {
     fn({
       type: 'whatsappStatus',
+      uid: currentUser?.uid || null,
+      email: currentUser?.email || null,
       status: connectionState,
       connected: connectionState === 'connected',
       pairingCode,
@@ -489,8 +717,13 @@ export function setWhatsAppBroadcaster(fn: (msg: unknown) => void) {
   }
 }
 
-export function removeWhatsAppBroadcaster(fn: (msg: unknown) => void) {
-  broadcastFns.delete(fn);
+export function removeWhatsAppBroadcaster(uid: string | null | undefined, fn: (msg: unknown) => void) {
+  const key = sanitizeUid(uid);
+  const set = broadcastFns.get(key);
+  if (set) {
+    set.delete(fn);
+    if (set.size === 0) broadcastFns.delete(key);
+  }
 }
 
 function requireSock(): WASocket {
@@ -503,9 +736,11 @@ function requireSock(): WASocket {
 
 export async function initWhatsAppSession(): Promise<void> {
   ensureDirs();
-  loadStoreFromRTDB();
+  // Restore the persisted store BEFORE connecting so the live history sync
+  // cannot race ahead and clobber the restored chats/messages.
+  await loadStoreFromRTDB();
   if (sock) return;
-  const hasCreds = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+  const hasCreds = fs.existsSync(path.join(authDirFor(userKey()), 'creds.json'));
   if (!hasCreds) {
     setState('disconnected', {
       error: 'No WhatsApp credentials yet. Link from Settings > Connect WhatsApp.',
@@ -522,14 +757,33 @@ export async function pairWhatsApp(phone: string): Promise<{ ok: boolean; pairin
     return { ok: false, error: 'Invalid phone number. Use country code + number, digits only (e.g. 639171234567).' };
   }
   try {
-    if (connectionState === 'connected') {
-      return { ok: false, error: 'Already linked. Unlink first to pair a different device.' };
+    // Auto-unlink any existing session so a fresh pairing code is always
+    // generated — no manual "Unlink first" step needed.
+    if (connectionState === 'connected' || sock) {
+      await stopCurrentSocket('logout');
+      const credsPath = path.join(authDirFor(userKey()), 'creds.json');
+      if (fs.existsSync(credsPath)) fs.rmSync(credsPath, { force: true });
+      writeMeta({ connectedOnce: false });
+      waStore.chats.clear();
+      waStore.contacts.clear();
+      waStore.messages.clear();
+      waStore.calls.length = 0;
+      await clearStoreInRTDB();
     }
-    await stopCurrentSocket('cancel');
     if (!readMeta().connectedOnce) purgeStaleAuth();
     pairingPhone = digits;
     await connectSocket();
     if (!sock) return { ok: false, error: 'Failed to create WhatsApp socket.' };
+    // connectSocket() resolves as soon as the socket object exists — before the
+    // underlying WebSocket is open. Baileys' requestPairingCode() throws
+    // "Connection Closed" when called early (sendRawMessage refuses to write to
+    // a non-open ws), so wait for the socket to open before requesting the code.
+    try {
+      await withTimeout(20_000, sock.waitForSocketOpen());
+    } catch {
+      setState('failed', { error: 'Timed out waiting for the WhatsApp connection to open. Try again.' });
+      return { ok: false, error: 'Timed out waiting for the WhatsApp connection to open. Try again.' };
+    }
     setState('pairing');
     pairingCode = await sock.requestPairingCode(digits);
     setState('pairing');
@@ -543,10 +797,19 @@ export async function pairWhatsApp(phone: string): Promise<{ ok: boolean; pairin
 export async function pairWhatsAppWithQr(): Promise<{ ok: boolean; error?: string }> {
   ensureDirs();
   try {
-    if (connectionState === 'connected') {
-      return { ok: false, error: 'Already linked. Unlink first to pair a different device.' };
+    // Auto-unlink any existing session so a fresh QR is always generated —
+    // no manual "Unlink first" step needed.
+    if (connectionState === 'connected' || sock) {
+      await stopCurrentSocket('logout');
+      const credsPath = path.join(authDirFor(userKey()), 'creds.json');
+      if (fs.existsSync(credsPath)) fs.rmSync(credsPath, { force: true });
+      writeMeta({ connectedOnce: false });
+      waStore.chats.clear();
+      waStore.contacts.clear();
+      waStore.messages.clear();
+      waStore.calls.length = 0;
+      await clearStoreInRTDB();
     }
-    await stopCurrentSocket('cancel');
     if (!readMeta().connectedOnce) purgeStaleAuth();
     pairingPhone = null;
     pairingCode = null;
@@ -573,6 +836,11 @@ export async function cancelWhatsAppPairing(): Promise<{ ok: boolean; error?: st
 }
 
 async function stopCurrentSocket(intent: 'cancel' | 'logout'): Promise<void> {
+  // Invalidate any in-flight connectSocket() first — it may still be awaiting
+  // getBaileys()/useMultiFileAuthState() with no `sock` to end yet. Without
+  // this, cancel/logout during a pending connect lets the connect finish and
+  // resurrect a socket (e.g. QR/pairing reappears right after Cancel).
+  sessionEpoch += 1;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -602,7 +870,7 @@ async function stopCurrentSocket(intent: 'cancel' | 'logout'): Promise<void> {
 export async function logoutWhatsApp(): Promise<{ ok: boolean; error?: string }> {
   try {
     await stopCurrentSocket('logout');
-    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    const credsPath = path.join(authDirFor(userKey()), 'creds.json');
     if (fs.existsSync(credsPath)) fs.rmSync(credsPath, { force: true });
     writeMeta({ connectedOnce: false });
     waStore.chats.clear();
@@ -617,8 +885,42 @@ export async function logoutWhatsApp(): Promise<{ ok: boolean; error?: string }>
   }
 }
 
+// Hard reset: removes ALL WhatsApp auth state (not just creds.json) so a
+// fresh pairing is possible. Unlike logoutWhatsApp this works even when the
+// session is stuck in 'connecting'/'failed' (e.g. a 403-banned session whose
+// socket never opens) — logout needs a live socket, reset does not. It also
+// clears the persisted store and resets the `connectedOnce` pairing gate that
+// otherwise prevents purgeStaleAuth() from running on the next pair attempt.
+export async function resetWhatsApp(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    // Stop any socket + timers without demanding a live connection.
+    await stopCurrentSocket('cancel');
+    // Wipe every auth artifact (creds, signal keys, app-state sync, sessions).
+    purgeStaleAuth();
+    // Reset the pairing gate so the next pair() call purges cleanly too.
+    writeMeta({ connectedOnce: false });
+    // Clear the in-memory + RTDB + local-file stores.
+    waStore.chats.clear();
+    waStore.contacts.clear();
+    waStore.messages.clear();
+    waStore.calls.length = 0;
+    // clearStoreInRTDB also removes the local whatsapp-store.json file.
+    await clearStoreInRTDB();
+    setState('disconnected');
+    return { ok: true };
+  } catch (err: any) {
+    setState('failed', { error: err.message });
+    return { ok: false, error: err.message };
+  }
+}
+
 async function connectSocket(): Promise<void> {
   ensureDirs();
+  // This socket belongs to the current session epoch. Any user switch between
+  // now and when the socket finishes opening makes this socket stale — it must
+  // neither become `sock` nor run its event handlers against the new user's
+  // store/state.
+  const epoch = sessionEpoch;
   closeIntent = 'none';
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -639,11 +941,11 @@ async function connectSocket(): Promise<void> {
     Browsers,
     DisconnectReason,
   } = await getBaileys();
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state, saveCreds } = await useMultiFileAuthState(authDirFor(userKey()));
   const logger = pino({ level: 'silent' });
 
   setState('connecting');
-  sock = makeWASocket({
+  const newSock = makeWASocket({
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger as any) },
     printQRInTerminal: false,
     browser: Browsers.ubuntu('Beatrice OSS'),
@@ -651,17 +953,32 @@ async function connectSocket(): Promise<void> {
     syncFullHistory: true,
     markOnlineOnConnect: true,
   });
+  if (epoch !== sessionEpoch) {
+    // A user switch happened while we were creating the socket — discard it.
+    try {
+      newSock.end(new Error('session switched'));
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  sock = newSock;
+  const stale = () => epoch !== sessionEpoch;
 
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update: any) => {
+    if (stale()) return;
     const { connection, lastDisconnect, qr } = update || {};
     if (qr) {
       qrRaw = qr;
       void (async () => {
         try {
-          qrDataUrl = await QRCode.toDataURL(qr, { width: 480, margin: 1 });
+          const dataUrl = await QRCode.toDataURL(qr, { width: 480, margin: 1 });
+          if (stale()) return;
+          qrDataUrl = dataUrl;
         } catch {
+          if (stale()) return;
           qrDataUrl = null;
         }
         setState('pairing');
@@ -730,6 +1047,11 @@ async function connectSocket(): Promise<void> {
         });
         return;
       }
+      // The socket that just closed is dead — drop the reference so the
+      // reconnect timer below can build a fresh one. Previously `sock` stayed
+      // set here and the timer's `!sock` guard silently blocked every
+      // reconnection attempt, leaving the linked session dead until restart.
+      sock = null;
       const delay = Math.min(
         BASE_RECONNECT_MS * Math.pow(2, reconnectAttempt) + Math.random() * 1000,
         MAX_RECONNECT_MS
@@ -739,6 +1061,7 @@ async function connectSocket(): Promise<void> {
       if (reconnectTimer === null) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
+          if (stale()) return;
           if (connectionState !== 'connected' && connectionState !== 'pairing' && !sock) {
             connectSocket().catch((err: any) => setState('failed', { error: err.message }));
           }
@@ -747,25 +1070,33 @@ async function connectSocket(): Promise<void> {
     }
   });
 
-  sock.ev.on('messaging-history.set', seedFromHistorySync);
+  sock.ev.on('messaging-history.set', (ev: any) => {
+    if (stale()) return;
+    seedFromHistorySync(ev);
+  });
   sock.ev.on('messages.upsert', ({ messages }: { messages: WAMessage[] }) => {
+    if (stale()) return;
     for (const m of messages) pushMessage(m);
     void broadcastIncomingMessages(messages);
     if (bossMode) void maybeAutoReply(messages);
   });
   sock.ev.on('messages.update', (updates: any[]) => {
+    if (stale()) return;
     for (const u of updates) {
       const list = u.key?.remoteJid ? waStore.messages.get(u.key.remoteJid) : null;
       if (!list) continue;
       const idx = list.findIndex((m) => m.key?.id === u.key.id);
       if (idx >= 0) list[idx] = { ...list[idx], ...u };
     }
+    schedulePersist();
   });
   sock.ev.on('contacts.upsert', (contacts: any[]) => {
+    if (stale()) return;
     for (const c of contacts) registerContact(c.id, c.name, c.notify, c.pushName);
     schedulePersist();
   });
   sock.ev.on('chats.upsert', (chats: any[]) => {
+    if (stale()) return;
     for (const c of chats) {
       const existing = waStore.chats.get(c.id);
       waStore.chats.set(c.id, {
@@ -780,6 +1111,7 @@ async function connectSocket(): Promise<void> {
     }
   });
   sock.ev.on('chats.update', (chats: any[]) => {
+    if (stale()) return;
     for (const c of chats) {
       const existing = waStore.chats.get(c.id);
       if (!existing) continue;
@@ -999,25 +1331,35 @@ async function withApproval(
   if (!gate.allowed) {
     return { ok: false, error: gate.reason, requiresApproval: true };
   }
+  // The approval wait can take up to 30s — if the user switched accounts in
+  // that window, run() would execute on the WRONG user's socket.
+  const epoch = sessionEpoch;
   try {
+    if (epoch !== sessionEpoch) {
+      return { ok: false, error: 'Session switched while awaiting approval. Try again.' };
+    }
     const result = await run();
-    ctx?.broadcast?.({
-      type: 'workspaceOutput',
-      tool: 'whatsapp',
-      action,
-      recipient: recipientJid,
-      status: 'ok',
-    });
+    if (epoch === sessionEpoch) {
+      ctx?.broadcast?.({
+        type: 'workspaceOutput',
+        tool: 'whatsapp',
+        action,
+        recipient: recipientJid,
+        status: 'ok',
+      });
+    }
     return result;
   } catch (err: any) {
-    ctx?.broadcast?.({
-      type: 'workspaceOutput',
-      tool: 'whatsapp',
-      action,
-      recipient: recipientJid,
-      status: 'error',
-      error: err.message,
-    });
+    if (epoch === sessionEpoch) {
+      ctx?.broadcast?.({
+        type: 'workspaceOutput',
+        tool: 'whatsapp',
+        action,
+        recipient: recipientJid,
+        status: 'error',
+        error: err.message,
+      });
+    }
     return { ok: false, error: err.message };
   }
 }
@@ -1263,6 +1605,8 @@ export function getWhatsAppStatus(): {
   messages: number;
   bossMode: boolean;
   profile: { name: string | null; phone: string | null; avatarUrl: string | null } | null;
+  uid: string | null;
+  email: string | null;
 } {
   return {
     connected: connectionState === 'connected',
@@ -1276,7 +1620,13 @@ export function getWhatsAppStatus(): {
     messages: [...waStore.messages.values()].reduce((n, l) => n + l.length, 0),
     bossMode,
     profile: connectionState === 'connected' ? profile : null,
+    uid: currentUser?.uid || null,
+    email: currentUser?.email || null,
   };
+}
+
+export function getWhatsAppUser(): { uid: string | null; email: string | null } {
+  return { uid: currentUser?.uid || null, email: currentUser?.email || null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1865,10 +2215,13 @@ export async function maybeAutoReply(messages: WAMessage[]) {
     if (!incoming) continue;
 
     autoReplyInFlight.add(jid);
+    // Capture BEFORE any further awaits: a user switch during getIncomingText
+    // above must not let this reply ride the new user's socket.
+    const epoch = sessionEpoch;
     try {
       // mark the message as read
       try {
-        await sock!.readMessages([m.key!]);
+        if (epoch === sessionEpoch) await sock!.readMessages([m.key!]);
       } catch {
         // ignore
       }
@@ -1920,6 +2273,9 @@ YOUR REPLY:`;
         continue;
       }
       const trimmed = reply.slice(0, AUTO_REPLY_MAX_LEN);
+      // The user may have switched (or logged out) during the Gemini call —
+      // sending on the old socket would reply from the wrong account.
+      if (epoch !== sessionEpoch || !sock || connectionState !== 'connected') continue;
       await sock!.sendMessage(jid as any, { text: trimmed } as AnyMessageContent);
       console.log(`[WhatsApp] Boss Mode: replied to ${jid} with ${trimmed.length} chars`);
       autoReplyCooldowns.set(jid, Date.now());
@@ -2444,6 +2800,8 @@ export async function runInternalWhatsAppAction(action: string, args: any, ctx: 
       }
       case 'logout':
         return await logoutWhatsApp();
+      case 'reset':
+        return await resetWhatsApp();
       case 'get_knowledge_base':
         return { ok: true, knowledgeBase: await getWhatsAppKnowledgeBase(true), bossMode: getBossMode() };
       case 'set_boss_mode': {
@@ -2466,6 +2824,42 @@ function findMessageChat(messageId: string): string | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown flush
+// ---------------------------------------------------------------------------
+
+// persistStore is debounced 4s behind schedulePersist(); without this, a
+// restart (systemd sends SIGTERM on `systemctl restart`) in the debounce
+// window silently drops the newest messages/chats from the persisted store.
+let shuttingDown = false;
+async function flushStoreOnShutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  stopHeartbeat();
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  try {
+    await persistStore();
+  } catch (err: any) {
+    console.error('[WhatsApp] Shutdown persist failed:', err?.message || err);
+  }
+}
+
+function handleShutdown(signal: string) {
+  // Bound the flush (e.g. RTDB hanging) so shutdown never stalls forever.
+  const guard = setTimeout(() => process.exit(0), 5000);
+  guard.unref?.();
+  flushStoreOnShutdown().finally(() => process.exit(0));
+}
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));
 
 // auto-init on import (resumes existing session; does not block server boot)
 initWhatsAppSession().catch((err: any) => {

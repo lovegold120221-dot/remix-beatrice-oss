@@ -9,6 +9,7 @@ import {
   GoogleAuthProvider,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
 } from 'firebase/auth';
 import { auth, googleProvider, db } from '../lib/firebase';
 import { ref, update, remove } from 'firebase/database';
@@ -20,9 +21,11 @@ interface AuthContextType {
   loading: boolean;
   accessToken: string | null;
   explicitlyAuthenticated: boolean;
+  isNewUser: boolean;
   signInWithGoogle: () => Promise<void>;
   signUpWithEmail: (email: string, password: string) => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
+  resetPassword: (email: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -31,9 +34,11 @@ const AuthContext = createContext<AuthContextType>({
   loading: true,
   accessToken: null,
   explicitlyAuthenticated: false,
+  isNewUser: false,
   signInWithGoogle: async () => {},
   signUpWithEmail: async () => {},
   signInWithEmail: async () => {},
+  resetPassword: async () => {},
   logout: async () => {},
 });
 
@@ -58,6 +63,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState<boolean>(true);
   const [accessToken, setAccessToken] = useState<string | null>(() => loadPersistedToken());
   const [explicitlyAuthenticated, setExplicitlyAuthenticated] = useState<boolean>(false);
+  // True when the signed-in account was created in this session (fresh
+  // registration) — used to route new users to the WhatsApp integration step.
+  const [isNewUser, setIsNewUser] = useState<boolean>(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -80,6 +88,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             await persistAccessToken(credential.accessToken);
           }
           setExplicitlyAuthenticated(true);
+          const isFresh = result.user.metadata?.creationTime === result.user.metadata?.lastSignInTime;
+          setIsNewUser(!!isFresh);
         }
       })
       .catch((err) => console.error('Redirect sign-in result error:', err))
@@ -141,6 +151,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Flip the gate immediately so the main page shows right away; the
       // token persistence runs in the background.
       setExplicitlyAuthenticated(true);
+      // Fresh Google account (just created) → route to WhatsApp integration.
+      const isFresh = result.user.metadata?.creationTime === result.user.metadata?.lastSignInTime;
+      setIsNewUser(!!isFresh);
       if (credential?.accessToken) {
         void persistAccessToken(credential.accessToken).catch(() => {
           // token already saved to localStorage; RTDB backup failure is non-fatal
@@ -173,12 +186,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signUpWithEmail = async (email: string, password: string) => {
     await createUserWithEmailAndPassword(auth, email, password);
+    setIsNewUser(true);
     setExplicitlyAuthenticated(true);
   };
 
   const signInWithEmail = async (email: string, password: string) => {
     await signInWithEmailAndPassword(auth, email, password);
     setExplicitlyAuthenticated(true);
+  };
+
+  const resetPassword = async (email: string) => {
+    await sendPasswordResetEmail(auth, email);
   };
 
   return (
@@ -188,9 +206,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loading,
         accessToken,
         explicitlyAuthenticated,
+        isNewUser,
         signInWithGoogle,
         signUpWithEmail,
         signInWithEmail,
+        resetPassword,
         logout,
       }}
     >

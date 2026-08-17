@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Loader2, Mail, Lock, KeyRound } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import iconEburon from '../assets/icon-eburon.svg';
 
 const GoogleG: React.FC<{ className?: string }> = ({ className }) => (
   <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -51,17 +52,48 @@ const authErrorText = (err: unknown): string => {
 };
 
 export const AuthPage: React.FC<AuthPageProps> = ({ onSkip }) => {
-  const { signInWithGoogle, signUpWithEmail, signInWithEmail } = useAuth();
+  const { signInWithGoogle, signUpWithEmail, signInWithEmail, resetPassword } = useAuth();
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [busy, setBusy] = useState<'email' | 'google' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resetMode, setResetMode] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
 
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (resetMode) {
+      if (!email) {
+        setError('Enter your email address.');
+        return;
+      }
+      setBusy('email');
+      setError(null);
+      try {
+        await resetPassword(email);
+        setResetSent(true);
+      } catch (err) {
+        const code = (err as { code?: string })?.code || '';
+        // Do not reveal whether the account exists.
+        if (code === 'auth/user-not-found') {
+          setResetSent(true);
+        } else {
+          setError(authErrorText(err));
+          console.error('AuthPage reset error:', err);
+        }
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
     if (!email || !password) {
       setError('Enter your email and password.');
+      return;
+    }
+    if (mode === 'signup' && password !== confirmPassword) {
+      setError('Passwords do not match.');
       return;
     }
     setBusy('email');
@@ -105,7 +137,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onSkip }) => {
       <div className="relative flex flex-col items-center pt-16 space-y-4">
         <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-[#00f2fe] via-[#4facfe] to-[#8e44ad] p-[3px] shadow-xl shadow-[#00f2fe]/20">
           <img
-            src="https://dual.eburon.ai/logo.png"
+            src={iconEburon}
             alt="Beatrice"
             className="w-full h-full rounded-full object-cover"
             draggable={false}
@@ -132,6 +164,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onSkip }) => {
               type="button"
               onClick={() => {
                 setMode(m);
+                setResetMode(false);
+                setResetSent(false);
+                setConfirmPassword('');
                 setError(null);
               }}
               className={`flex-1 h-10 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
@@ -146,28 +181,58 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onSkip }) => {
         </div>
 
         <form onSubmit={handleEmailSubmit} className="space-y-3">
-          <div className="relative">
-            <Mail className="w-4 h-4 text-[#8e8e93] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="Email"
-              autoComplete="email"
-              className={inputCls}
-            />
-          </div>
-          <div className="relative">
-            <Lock className="w-4 h-4 text-[#8e8e93] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Password"
-              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-              className={inputCls}
-            />
-          </div>
+          {!resetMode && (
+            <>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-[#8e8e93] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="Email"
+                  autoComplete="email"
+                  className={inputCls}
+                />
+              </div>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-[#8e8e93] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Password"
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  className={inputCls}
+                />
+              </div>
+              {mode === 'signup' && (
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-[#8e8e93] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm password"
+                    autoComplete="new-password"
+                    className={inputCls}
+                  />
+                </div>
+              )}
+            </>
+          )}
+          {resetMode && (
+            <div className="relative">
+              <Mail className="w-4 h-4 text-[#8e8e93] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email"
+                autoComplete="email"
+                className={inputCls}
+              />
+            </div>
+          )}
 
           <button
             type="submit"
@@ -176,17 +241,52 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onSkip }) => {
           >
             {busy === 'email' ? (
               <Loader2 className="w-5 h-5 animate-spin" />
+            ) : resetMode ? (
+              <Mail className="w-4 h-4" />
             ) : (
               <KeyRound className="w-4 h-4" />
             )}
             {busy === 'email'
-              ? mode === 'signup'
-                ? 'Creating account...'
-                : 'Signing in...'
-              : mode === 'signup'
-                ? 'Create Account'
-                : 'Sign In'}
+              ? resetMode
+                ? 'Sending reset link...'
+                : mode === 'signup'
+                  ? 'Creating account...'
+                  : 'Signing in...'
+              : resetMode
+                ? 'Send Reset Link'
+                : mode === 'signup'
+                  ? 'Create Account'
+                  : 'Sign In'}
           </button>
+
+          {resetSent ? (
+            <p className="text-center text-[11px] text-emerald-400">
+              If an account exists for {email}, a password reset link has been sent. Check your inbox.
+            </p>
+          ) : resetMode ? (
+            <button
+              type="button"
+              onClick={() => {
+                setResetMode(false);
+                setResetSent(false);
+                setError(null);
+              }}
+              className="w-full text-center text-xs text-[#8e8e93] hover:text-white transition-colors py-1 cursor-pointer"
+            >
+              Back to sign in
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setResetMode(true);
+                setError(null);
+              }}
+              className="w-full text-center text-xs text-[#8e8e93] hover:text-white transition-colors py-1 cursor-pointer"
+            >
+              Forgot password?
+            </button>
+          )}
         </form>
 
         <div className="flex items-center gap-3">

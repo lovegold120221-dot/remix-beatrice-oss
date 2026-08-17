@@ -30,6 +30,7 @@ import { ContextWindowHUD } from './components/ContextWindowHUD';
 import { MemoryInspectorModal } from './components/MemoryInspectorModal';
 import { VadControlWidget } from './components/VadControlWidget';
 import { WhatsAppApprovalModal, WhatsAppApprovalState, WhatsAppPanelState } from './components/WhatsAppPanel';
+import { WhatsAppOnboarding } from './components/WhatsAppOnboarding';
 import { TasksPage } from './components/TasksPage';
 import { useAuth } from './context/AuthContext';
 import { AuthPage } from './components/AuthPage';
@@ -71,7 +72,7 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  const { user, signInWithGoogle, explicitlyAuthenticated, loading: authLoading } = useAuth();
+  const { user, signInWithGoogle, explicitlyAuthenticated, loading: authLoading, isNewUser } = useAuth();
   const [status, setStatus] = useState<SessionStatus>('disconnected');
   const [toolLogs, setToolLogs] = useState<ToolCallLog[]>([]);
   const [sandboxRuns, setSandboxRuns] = useState<CodeSandboxRun[]>([]);
@@ -91,6 +92,9 @@ export default function App() {
     error: null,
     profile: null,
   });
+  // True once the server has pushed the first whatsappStatus snapshot, so the
+  // onboarding step never flashes before we know whether WhatsApp is linked.
+  const [waStatusKnown, setWaStatusKnown] = useState<boolean>(false);
   const [waApproval, setWaApproval] = useState<WhatsAppApprovalState | null>(null);
 
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -117,6 +121,15 @@ export default function App() {
     }
   });
   const [skipAuth, setSkipAuth] = useState<boolean>(false);
+  // WhatsApp integration step shown right after a NEW account is created.
+  // Skipped once per session (or when the user links WhatsApp).
+  const [waOnboardingDone, setWaOnboardingDone] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('beatrice_wa_onboarding_done') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [streamType, setStreamType] = useState<'camera' | 'screen' | 'off'>('off');
   const [facingMode, setFacingMode] = useState<CameraFacingMode>('user');
   const videoElemRef = useRef<HTMLVideoElement | null>(null);
@@ -520,6 +533,8 @@ export default function App() {
               recentTurns: recent,
               lastInteractionAt: meta.lastInteractionAt || 0,
               userDisplayName: userRef.current?.displayName || 'Boss',
+              uid: user?.uid || null,
+              email: user?.email || null,
             },
           })
         );
@@ -608,6 +623,7 @@ export default function App() {
             break;
 
           case 'whatsappStatus':
+            setWaStatusKnown(true);
             setWaStatus({
               status: msg.status,
               connected: msg.connected,
@@ -617,6 +633,8 @@ export default function App() {
               reconnectAttempt: msg.reconnectAttempt ?? 0,
               profile: msg.profile ?? null,
               bossMode: msg.bossMode ?? false,
+              uid: msg.uid ?? null,
+              email: msg.email ?? null,
             });
             break;
 
@@ -878,8 +896,10 @@ export default function App() {
       console.log('WebSocket connection closed.');
       setStatus('disconnected');
 
-      // Exponential backoff automatic reconnect if unexpected disconnect
-      const MAX_RECONNECT_ATTEMPTS = 10;
+      // Exponential backoff automatic reconnect if unexpected disconnect.
+      // Retry forever (capped delay) so the bridge self-heals instead of
+      // stopping and demanding a manual tap.
+      const MAX_RECONNECT_ATTEMPTS = Infinity;
       const INITIAL_RECONNECT_DELAY_MS = 1000;
       const MAX_RECONNECT_DELAY_MS = 30000;
 
@@ -951,6 +971,19 @@ export default function App() {
   // session does NOT pass the gate: the skip button always routes to the AuthPage
   // (create account / login) so the Google OAuth token is renewed on every entry.
   const gatePassed = introDone && (explicitlyAuthenticated || skipAuth);
+  // WhatsApp integration step: shown for ANY signed-in user (new registration
+  // or returning login) whose WhatsApp is not yet linked. Waits for the first
+  // server status snapshot so linked users never see it flash.
+  const showWaOnboarding =
+    gatePassed && !waOnboardingDone && waStatusKnown && !waStatus.connected;
+
+  // Fallback: if the WhatsApp status snapshot never arrives (WS hiccup), don't
+  // block the app forever — proceed after a few seconds.
+  useEffect(() => {
+    if (!gatePassed || waStatusKnown) return;
+    const t = setTimeout(() => setWaStatusKnown(true), 4000);
+    return () => clearTimeout(t);
+  }, [gatePassed, waStatusKnown]);
 
   // Block pinch/double-tap/ctrl-wheel zoom (vertical scrolling stays untouched)
   useEffect(() => {
@@ -982,6 +1015,15 @@ export default function App() {
       // ignore
     }
   }, []);
+
+  // After Google authentication completes (popup or redirect round-trip),
+  // skip straight to the app — the WhatsApp integration step shows right
+  // away instead of replaying the intro video.
+  useEffect(() => {
+    if (explicitlyAuthenticated && showIntro) {
+      finishIntro();
+    }
+  }, [explicitlyAuthenticated, showIntro, finishIntro]);
 
   const handleIntroLoaded = useCallback(() => {
     setShowIntroSkip(false);
@@ -1052,6 +1094,8 @@ export default function App() {
               .map((t) => ({ role: t.role, text: t.text, timestamp: t.timestamp })),
             lastInteractionAt: meta.lastInteractionAt || 0,
             userDisplayName: userRef.current?.displayName || 'Boss',
+            uid: user?.uid || null,
+            email: user?.email || null,
           },
         })
       );
@@ -1406,12 +1450,20 @@ export default function App() {
     setWaApproval(null);
   };
 
+  const waAuthHeaders = () => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const u = user;
+    if (u?.uid) headers['x-wa-uid'] = u.uid;
+    if (u?.email) headers['x-wa-email'] = u.email;
+    return headers;
+  };
+
   const handlePairWhatsApp = async (phone: string) => {
     setWaStatus((s) => ({ ...s, error: null, status: 'connecting' }));
     try {
       const res = await fetch('/api/whatsapp/pair', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: waAuthHeaders(),
         body: JSON.stringify({ phone }),
       });
       const data = await res.json();
@@ -1434,7 +1486,7 @@ export default function App() {
   const handleQrPairWhatsApp = async () => {
     setWaStatus((s) => ({ ...s, error: null, status: 'connecting', qrDataUrl: null, pairingCode: null }));
     try {
-      const res = await fetch('/api/whatsapp/pair-qr', { method: 'POST' });
+      const res = await fetch('/api/whatsapp/pair-qr', { method: 'POST', headers: waAuthHeaders() });
       const data = await res.json();
       if (!data.ok) {
         setWaStatus((s) => ({ ...s, status: 'disconnected', error: data.error || 'QR pairing failed.' }));
@@ -1446,7 +1498,7 @@ export default function App() {
 
   const handleCancelWhatsAppPairing = async () => {
     try {
-      await fetch('/api/whatsapp/cancel', { method: 'POST' });
+      await fetch('/api/whatsapp/cancel', { method: 'POST', headers: waAuthHeaders() });
     } catch {
       // ignore
     }
@@ -1455,7 +1507,7 @@ export default function App() {
 
   const handleLogoutWhatsApp = async () => {
     try {
-      await fetch('/api/whatsapp/logout', { method: 'POST' });
+      await fetch('/api/whatsapp/logout', { method: 'POST', headers: waAuthHeaders() });
     } catch {
       // ignore
     }
@@ -1470,12 +1522,35 @@ export default function App() {
     });
   };
 
+  const handleResetWhatsApp = async () => {
+    try {
+      const res = await fetch('/api/whatsapp/reset', { method: 'POST', headers: waAuthHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.error) {
+        setWaStatus((s) => ({ ...s, error: data.error }));
+        return;
+      }
+    } catch (err: any) {
+      setWaStatus((s) => ({ ...s, error: err.message || 'Reset failed.' }));
+      return;
+    }
+    setWaStatus({
+      status: 'disconnected',
+      connected: false,
+      pairingCode: null,
+      qrDataUrl: null,
+      error: null,
+      profile: null,
+      bossMode: false,
+    });
+  };
+
   const handleToggleWhatsAppBossMode = async (enabled: boolean) => {
     setWaStatus((s) => ({ ...s, bossMode: enabled }));
     try {
       const res = await fetch('/api/whatsapp/boss-mode', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: waAuthHeaders(),
         body: JSON.stringify({ enabled }),
       });
       const data = await res.json();
@@ -1514,6 +1589,8 @@ export default function App() {
                 .map((t) => ({ role: t.role, text: t.text, timestamp: t.timestamp })),
               lastInteractionAt: meta.lastInteractionAt,
               userDisplayName: userRef.current?.displayName || 'Boss',
+              uid: user?.uid || null,
+              email: user?.email || null,
             },
           })
         );
@@ -1536,7 +1613,7 @@ export default function App() {
 
   return (
     <div className="w-screen h-screen h-dvh bg-[#050505] text-white flex justify-center items-center overflow-x-hidden overflow-y-auto font-sans selection:bg-[#4facfe]/30 select-none">
-      {gatePassed && (
+      {gatePassed && !showWaOnboarding && (
         <>
       {/* App Container Frame */}
       <div className="w-full max-w-[430px] h-full sm:h-[90vh] sm:rounded-[44px] sm:border-[6px] sm:border-[#1c1c1e] bg-black flex flex-col justify-between relative sm:shadow-[0_0_60px_rgba(0,0,0,0.8),inset_0_0_0_2px_#2c2c2e] overflow-hidden">
@@ -1787,6 +1864,7 @@ export default function App() {
         onQrPairWhatsApp={handleQrPairWhatsApp}
         onCancelWhatsAppPairing={handleCancelWhatsAppPairing}
         onLogoutWhatsApp={handleLogoutWhatsApp}
+        onResetWhatsApp={handleResetWhatsApp}
         onToggleWhatsAppBossMode={handleToggleWhatsAppBossMode}
         onOpenProfile={() => {
           setIsSettingsOpen(false);
@@ -1826,6 +1904,25 @@ export default function App() {
       {/* Auth Gate Page — wait for auth init (e.g. redirect result resume) to
           avoid flashing the login page after Google grants permissions */}
       {!showIntro && !authLoading && !gatePassed && <AuthPage onSkip={() => setSkipAuth(true)} />}
+
+      {/* WhatsApp integration step — shown for any signed-in user whose
+          WhatsApp is not yet linked (new registration or returning login) */}
+      {!showIntro && !authLoading && showWaOnboarding && (
+        <WhatsAppOnboarding
+          status={waStatus}
+          onPair={handlePairWhatsApp}
+          onQr={handleQrPairWhatsApp}
+          onCancel={handleCancelWhatsAppPairing}
+          onSkip={() => {
+            try {
+              sessionStorage.setItem('beatrice_wa_onboarding_done', '1');
+            } catch {
+              // ignore
+            }
+            setWaOnboardingDone(true);
+          }}
+        />
+      )}
 
       {/* Tasks/Processes Page - shows ongoing automation processes */}
       {isTasksOpen && (
