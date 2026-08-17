@@ -19,6 +19,7 @@ const CODING_AGENT_PORT = process.env.CODING_AGENT_PORT || '5560';
 export interface ToolContext {
   ai?: GoogleGenAI;
   broadcast: (msg: unknown) => void;
+  deviceType?: 'mobile' | 'desktop';
 }
 
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
@@ -88,6 +89,39 @@ function forwardToService(
 
     ws.on('error', (err) => reject(err));
   });
+}
+
+export async function handleOpenLocalTerminal(
+  args: { command?: string },
+  ctx: ToolContext
+) {
+  const deviceType = ctx.deviceType || 'desktop';
+  const host =
+    process.env.SSH_HOST ||
+    (process.env.APP_URL ? new URL(process.env.APP_URL).hostname : 'localhost');
+  const port = parseInt(process.env.SSH_PORT || '22', 10);
+  const user = process.env.SSH_USER || 'root';
+  const sshUrl = `ssh://${user}@${host}:${port}`;
+
+  const payload = {
+    deviceType,
+    mode: deviceType === 'mobile' ? 'termius' : 'browser',
+    sshUrl,
+    host,
+    port,
+    user,
+    command: args.command,
+  };
+
+  ctx.broadcast({ type: 'terminalOpen', ...payload });
+
+  return {
+    ...payload,
+    message:
+      deviceType === 'mobile'
+        ? `Opened a terminal on the user's phone via Termius (${sshUrl}).`
+        : 'Opened the in-browser terminal on the user device.',
+  };
 }
 
 export async function handleExecuteCodeSandbox(

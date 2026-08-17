@@ -15,6 +15,7 @@ import {
   handleGenerateVideo,
   handleGetSystemInfo,
   handleGetWeather,
+  handleOpenLocalTerminal,
   handleQwenChat,
   handleQwenImageEdit,
   handleQwenImageGenerate,
@@ -35,6 +36,7 @@ import {
   startCodingAgentService,
 } from './server/services/index.js';
 import { sendToService } from './server/toolProxy.js';
+import { createTerminalWss } from './server/terminalBridge.js';
 import {
   handleCreateGoogleMeet,
   handleListGmailMessages,
@@ -156,6 +158,17 @@ function getFunctionDeclarations() {
               cwd: { type: Type.STRING, description: 'Optional relative directory path' },
             },
             required: ['command'],
+          },
+        },
+        {
+          name: 'openLocalTerminal',
+          description:
+            'Opens a terminal for the user. On desktop, opens the in-browser terminal; on mobile, opens Termius (SSH) to the server so the user can run commands from their phone.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              command: { type: Type.STRING, description: 'Optional command to pre-fill in the terminal' },
+            },
           },
         },
         {
@@ -1054,6 +1067,7 @@ async function startServer() {
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
+  const terminalWss = createTerminalWss();
 
   server.on('upgrade', (request, socket, head) => {
     try {
@@ -1063,6 +1077,10 @@ async function startServer() {
       if (url.pathname === '/live' || url.pathname === '/live/') {
         wss.handleUpgrade(request, socket, head, (ws) => {
           wss.emit('connection', ws, request);
+        });
+      } else if (url.pathname === '/terminal' || url.pathname === '/terminal/') {
+        terminalWss.handleUpgrade(request, socket, head, (ws) => {
+          terminalWss.emit('connection', ws, request);
         });
       } else {
         socket.destroy();
@@ -1085,6 +1103,17 @@ async function startServer() {
       liveModel: 'gemini-3.1-flash-live-preview',
       apiKeyConfigured: !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY',
     });
+  });
+
+  app.get('/api/terminal/info', (req, res) => {
+    const host =
+      process.env.SSH_HOST ||
+      (process.env.APP_URL
+        ? new URL(process.env.APP_URL).hostname
+        : (req.headers.host || 'localhost').split(':')[0]);
+    const port = parseInt(process.env.SSH_PORT || '22', 10);
+    const user = process.env.SSH_USER || 'root';
+    res.json({ host, port, user, sshUrl: `ssh://${user}@${host}:${port}` });
   });
 
   app.post('/api/tools/execute-code', async (req, res) => {
@@ -1511,7 +1540,11 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                 });
 
                 let toolResult: unknown = null;
-                const toolCtx = { ai, broadcast: broadcastToClient };
+                const toolCtx = {
+                  ai,
+                  broadcast: broadcastToClient,
+                  deviceType: sessionBootstrap?.deviceType || 'desktop',
+                };
 
                 try {
                   if (name === 'executeCodeSandbox') {
@@ -1522,6 +1555,11 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                   } else if (name === 'runCliCommand') {
                     toolResult = await handleRunCliCommand(
                       args as { command: string; cwd?: string },
+                      toolCtx
+                    );
+                  } else if (name === 'openLocalTerminal') {
+                    toolResult = await handleOpenLocalTerminal(
+                      args as { command?: string },
                       toolCtx
                     );
                   } else if (name === 'deployAgentTask') {
