@@ -491,7 +491,7 @@ export default function App() {
   }, []);
 
   // Connect to Beatrice OSS WebSocket server with Exponential Backoff Strategy
-  const connectWebSocket = useCallback(() => {
+  const connectWebSocket = useCallback(async () => {
     // Clear any active reconnect timer
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -510,7 +510,17 @@ export default function App() {
     setStatus('connecting');
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/live`;
+
+    // Authenticate the WebSocket with the Firebase ID token. The browser
+    // WebSocket API cannot set headers, so the token is passed as a query
+    // parameter and verified server-side before the upgrade is accepted.
+    let token = '';
+    try {
+      token = (await auth.currentUser?.getIdToken()) || '';
+    } catch (err) {
+      console.warn('Failed to fetch Firebase ID token for WS auth:', err);
+    }
+    const wsUrl = `${protocol}//${window.location.host}/live${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
@@ -1255,7 +1265,7 @@ export default function App() {
       try {
         const res = await fetch('/api/tools/execute-code', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await authHeaders(),
           body: JSON.stringify({ code, language }),
         });
         const data = await res.json();
@@ -1286,7 +1296,7 @@ export default function App() {
       try {
         const res = await fetch('/api/tools/cli', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await authHeaders(),
           body: JSON.stringify({ command }),
         });
         const data = await res.json();
@@ -1313,7 +1323,7 @@ export default function App() {
       try {
         const res = await fetch('/api/tools/agent', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await authHeaders(),
           body: JSON.stringify({ agentName, task }),
         });
         const data = await res.json();
@@ -1367,7 +1377,7 @@ export default function App() {
       try {
         await fetch('/api/tools/canvas', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await authHeaders(),
           body: JSON.stringify({ canvasType, title, content }),
         });
         setCanvasData({ type: canvasType, title, content, updatedAt: Date.now() });
@@ -1384,7 +1394,7 @@ export default function App() {
       try {
         const res = await fetch('/api/tools/weather', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await authHeaders(),
           body: JSON.stringify({ location }),
         });
         const data = await res.json();
@@ -1461,7 +1471,7 @@ export default function App() {
       try {
         const res = await fetch('/api/tools/search', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await authHeaders(),
           body: JSON.stringify({ query }),
         });
         const data = await res.json();
@@ -1489,11 +1499,30 @@ export default function App() {
     setWaApproval(null);
   };
 
-  const waAuthHeaders = () => {
+  const waAuthHeaders = async () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const u = user;
     if (u?.uid) headers['x-wa-uid'] = u.uid;
     if (u?.email) headers['x-wa-email'] = u.email;
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    } catch (err) {
+      console.warn('Failed to fetch Firebase ID token for WhatsApp auth:', err);
+    }
+    return headers;
+  };
+
+  // Build authenticated headers for REST calls: attach the Firebase ID token
+  // as a Bearer token so the server can verify the caller (see server/auth.ts).
+  const authHeaders = async (extra: Record<string, string> = {}) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    } catch (err) {
+      console.warn('Failed to fetch Firebase ID token for REST auth:', err);
+    }
     return headers;
   };
 
@@ -1502,7 +1531,7 @@ export default function App() {
     try {
       const res = await fetch('/api/whatsapp/pair', {
         method: 'POST',
-        headers: waAuthHeaders(),
+        headers: await waAuthHeaders(),
         body: JSON.stringify({ phone }),
       });
       const data = await res.json();
@@ -1525,7 +1554,7 @@ export default function App() {
   const handleQrPairWhatsApp = async () => {
     setWaStatus((s) => ({ ...s, error: null, status: 'connecting', qrDataUrl: null, pairingCode: null }));
     try {
-      const res = await fetch('/api/whatsapp/pair-qr', { method: 'POST', headers: waAuthHeaders() });
+      const res = await fetch('/api/whatsapp/pair-qr', { method: 'POST', headers: await waAuthHeaders() });
       const data = await res.json();
       if (!data.ok) {
         setWaStatus((s) => ({ ...s, status: 'disconnected', error: data.error || 'QR pairing failed.' }));
@@ -1537,7 +1566,7 @@ export default function App() {
 
   const handleCancelWhatsAppPairing = async () => {
     try {
-      await fetch('/api/whatsapp/cancel', { method: 'POST', headers: waAuthHeaders() });
+      await fetch('/api/whatsapp/cancel', { method: 'POST', headers: await waAuthHeaders() });
     } catch {
       // ignore
     }
@@ -1546,7 +1575,7 @@ export default function App() {
 
   const handleLogoutWhatsApp = async () => {
     try {
-      await fetch('/api/whatsapp/logout', { method: 'POST', headers: waAuthHeaders() });
+      await fetch('/api/whatsapp/logout', { method: 'POST', headers: await waAuthHeaders() });
     } catch {
       // ignore
     }
@@ -1563,7 +1592,7 @@ export default function App() {
 
   const handleResetWhatsApp = async () => {
     try {
-      const res = await fetch('/api/whatsapp/reset', { method: 'POST', headers: waAuthHeaders() });
+      const res = await fetch('/api/whatsapp/reset', { method: 'POST', headers: await waAuthHeaders() });
       const data = await res.json().catch(() => ({}));
       if (data && data.error) {
         setWaStatus((s) => ({ ...s, error: data.error }));
@@ -1589,7 +1618,7 @@ export default function App() {
     try {
       const res = await fetch('/api/whatsapp/boss-mode', {
         method: 'POST',
-        headers: waAuthHeaders(),
+        headers: await waAuthHeaders(),
         body: JSON.stringify({ enabled }),
       });
       const data = await res.json();

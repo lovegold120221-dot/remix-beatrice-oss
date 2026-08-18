@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
+import { runPythonIsolated, runNodeIsolated } from '../isolate.js';
 
 const execPromise = promisify(exec);
 const PORT = parseInt(process.env.SANDBOX_SERVICE_PORT || '5556', 10);
@@ -89,17 +90,17 @@ async function executeSandbox(runId: string, language: string, code: string) {
       sendChunk(runId, run.output + '\n', true, run.error);
     }
   } else if (language === 'python' || language === 'py') {
-    try {
-      const { stdout, stderr } = await execPromise(`python3 -c ${JSON.stringify(code)}`, { timeout: 10000 });
-      run.output = stdout || stderr || '✓ Python script finished with no output.';
-      if (stderr) run.error = stderr;
-      sendChunk(runId, run.output + '\n', true, run.error);
-    } catch (err: any) {
-      run.output = err.stdout ? err.stdout + '\n' + err.stderr : err.message;
-      run.error = err.message;
+    // Run Python in an isolated, resource-limited, network-disabled process.
+    const res = await runPythonIsolated(code);
+    run.output = res.stdout || res.stderr || '✓ Python script finished with no output.';
+    if (res.timedOut) {
+      run.error = 'Execution timed out (resource limit)';
       run.status = 'error';
-      sendChunk(runId, run.output + '\n', true, run.error);
+    } else if (res.exitCode !== 0 || res.stderr) {
+      run.error = res.stderr || `Exit code ${res.exitCode}`;
+      run.status = 'error';
     }
+    sendChunk(runId, run.output + '\n', true, run.error);
   } else if (language === 'html') {
     try {
       fs.mkdirSync(PREVIEW_DIR, { recursive: true });

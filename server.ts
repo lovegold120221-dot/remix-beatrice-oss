@@ -8,6 +8,15 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import { logger } from './server/logger.js';
+import {
+  registerStandardMetrics,
+  renderMetrics,
+  incCounter,
+  observeHistogram,
+} from './server/metrics.js';
+import { requireAuth, verifyIdToken, authEnabled } from './server/auth.js';
+import { registerAllTools, dispatchTool } from './server/toolRegistry.js';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   handleDeployAgentTask,
@@ -1059,6 +1068,10 @@ function getFunctionDeclarations() {
 }
 
 async function startServer() {
+  // Register tool dispatch + standard metrics once at boot.
+  registerAllTools();
+  registerStandardMetrics();
+
   // Start internal tool services on separate ports
   startSandboxService();
   startCliService();
@@ -1069,44 +1082,54 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
-// ===== Authentication Middleware =====
-function authMiddleware(req: any, res: any, next: any) {
-  const authHeader = req.headers['authorization'] || '';
-  const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  const serviceId = req.headers['x-tdai-service-id'] || '';
-  
-  // Validate against environment variables
-  const validApiKey = process.env.TDAI_LLM_API_KEY;
-  const validServiceIds = [process.env.TDAI_LLM_SERVICE_ID || 'beatrice-memory'];
-  
-  // Check API key
-  if (!apiKey || apiKey !== validApiKey) {
-    res.status(401).json({ error: 'Invalid or missing API key' });
-    return;
-  }
-  
-  // Check service ID
-  if (!serviceId || !validServiceIds.includes(serviceId)) {
-    res.status(401).json({ error: 'Invalid or missing service ID' });
-    return;
-  }
-  
-  next();
-}
+  // Request logging + metrics middleware (applies to all HTTP routes).
+  app.use((req, res, next) => {
+    const start = Date.now();
+    incCounter('beatrice_http_requests_total');
+    res.on('finish', () => {
+      observeHistogram('beatrice_http_duration_seconds', (Date.now() - start) / 1000);
+    });
+    next();
+  });
 
-// ===========================================
+  // Prometheus metrics endpoint (no auth — intended for internal scraping).
+  app.get('/metrics', (_req, res) => {
+    res.set('Content-Type', 'text/plain; version=0.0.4');
+    res.send(renderMetrics());
+  });
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
   const terminalWss = createTerminalWss();
 
-  server.on('upgrade', (request, socket, head) => {
+  server.on('upgrade', async (request, socket, head) => {
     try {
       const proto = (request.headers['x-forwarded-proto'] as string) || 'http';
       const host = request.headers.host || 'localhost';
       const url = new URL(request.url || '', `${proto}://${host}`);
+
+      // Authenticate WebSocket connections. The browser WebSocket API cannot
+      // set custom headers, so the client passes its Firebase ID token as a
+      // `?token=` query parameter (see src/App.tsx). We verify it here before
+      // accepting the upgrade, so unauthenticated clients cannot reach /live
+      // or /terminal.
+      if (authEnabled()) {
+        const token = url.searchParams.get('token');
+        const user = await verifyIdToken(token);
+        if (!user) {
+          incCounter('beatrice_ws_connections_rejected_total');
+          logger.warn({ path: url.pathname }, 'rejected unauthenticated WebSocket upgrade');
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        // Attach the verified user to the request for downstream handlers.
+        (request as any).authUser = user;
+      }
+
       if (url.pathname === '/live' || url.pathname === '/live/') {
         wss.handleUpgrade(request, socket, head, (ws) => {
+          incCounter('beatrice_ws_connections_total');
           wss.emit('connection', ws, request);
         });
       } else if (url.pathname === '/terminal' || url.pathname === '/terminal/') {
@@ -1117,7 +1140,7 @@ function authMiddleware(req: any, res: any, next: any) {
         socket.destroy();
       }
     } catch (err) {
-      console.error('Error handling upgrade:', err);
+      logger.error({ err: String(err) }, 'Error handling upgrade');
       try {
         socket.destroy();
       } catch {
@@ -1145,6 +1168,17 @@ function authMiddleware(req: any, res: any, next: any) {
     const port = parseInt(process.env.SSH_PORT || '22', 10);
     const user = process.env.SSH_USER || 'root';
     res.json({ host, port, user, sshUrl: `ssh://${user}@${host}:${port}` });
+  });
+
+  // Global auth guard for all /api/* routes except the public health/info
+  // endpoints and the sandbox preview proxy (served to an iframe that cannot
+  // attach auth headers). Everything else — tool execution, Google Workspace,
+  // WhatsApp lifecycle — requires a verified Firebase ID token.
+  app.use('/api', (req, res, next) => {
+    if (req.path === '/health' || req.path === '/terminal/info' || req.path.startsWith('/sandbox/preview')) {
+      return next();
+    }
+    return requireAuth(req, res, next);
   });
 
   app.post('/api/tools/execute-code', async (req, res) => {
@@ -1249,10 +1283,15 @@ function authMiddleware(req: any, res: any, next: any) {
     }
   });
 
-  // Extract the signed-in Firebase user from WhatsApp API calls (the client
-  // sends these headers from useAuth()) and bind the WhatsApp session to them,
-  // so every account gets its own pairing/auth/store.
+  // Extract the signed-in Firebase user from WhatsApp API calls. The verified
+  // user is attached by requireAuth (res.locals.authUser); we fall back to the
+  // legacy x-wa-uid/x-wa-email headers only when auth is disabled (dev mode),
+  // so the WhatsApp session is always bound to a real authenticated account.
   const waUserFromReq = (req: any) => {
+    const verified = req.authUser || req.res?.locals?.authUser;
+    if (verified?.uid) {
+      return { uid: String(verified.uid), email: verified.email || null };
+    }
     const uid = String(req.headers['x-wa-uid'] || req.query?.uid || '').trim();
     const email = String(req.headers['x-wa-email'] || req.query?.email || '').trim() || null;
     return { uid, email };
@@ -1646,173 +1685,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                     const waEmail = sessionBootstrap?.email || null;
                     if (waUid) await setWhatsAppUser(waUid, waEmail);
                   }
-                  if (name === 'executeCodeSandbox') {
-                    toolResult = await handleExecuteCodeSandbox(
-                      args as { code: string; language: string; description?: string },
-                      toolCtx
-                    );
-                  } else if (name === 'runCliCommand') {
-                    toolResult = await handleRunCliCommand(
-                      args as { command: string; cwd?: string },
-                      toolCtx
-                    );
-                  } else if (name === 'openLocalTerminal') {
-                    toolResult = await handleOpenLocalTerminal(
-                      args as { command?: string },
-                      toolCtx
-                    );
-                  } else if (name === 'deployAgentTask') {
-                    toolResult = await handleDeployAgentTask(
-                      args as { agentName: string; task: string },
-                      toolCtx
-                    );
-                  } else if (name === 'runCodingAgent') {
-                    toolResult = await handleRunCodingAgent(
-                      args as { task: string; cwd?: string },
-                      toolCtx
-                    );
-                  } else if (name === 'getSystemInfo') {
-                    toolResult = await handleGetSystemInfo(toolCtx);
-                  } else if (name === 'updateCanvasVisual') {
-                    toolResult = await handleUpdateCanvasVisual(
-                      args as {
-                        canvasType: 'diagram' | 'markdown' | 'chart' | 'code_snippet';
-                        title: string;
-                        content: string;
-                      },
-                      toolCtx
-                    );
-                  } else if (name === 'getWeather') {
-                    toolResult = await handleGetWeather(args as { location: string });
-                  } else if (name === 'webSearch') {
-                    toolResult = await handleWebSearch(args as { query: string }, toolCtx);
-                  } else if (name === 'qwenChat') {
-                    toolResult = await handleQwenChat(args as any, toolCtx);
-                  } else if (name === 'qwenImageGenerate') {
-                    toolResult = await handleQwenImageGenerate(args as any, toolCtx);
-                  } else if (name === 'qwenImageEdit') {
-                    toolResult = await handleQwenImageEdit(args as any, toolCtx);
-                  } else if (name === 'qwenVideoGenerate') {
-                    toolResult = await handleQwenVideoGenerate(args as any, toolCtx);
-                  } else if (name === 'qwenTts') {
-                    toolResult = await handleQwenTts(args as any, toolCtx);
-                  } else if (name === 'generateVideo') {
-                    toolResult = await handleGenerateVideo(args as any, toolCtx);
-                  } else if (name === 'runBrowserAutomation') {
-                    toolResult = await handleRunBrowserAutomation(args as any, toolCtx);
-                  } else if (name === 'runComputerControl') {
-                    toolResult = await handleRunComputerControl(args as any, toolCtx);
-                  } else if (name === 'createGoogleMeet') {
-                    toolResult = await handleCreateGoogleMeet(args as any, toolCtx);
-                  } else if (name === 'listGmailMessages') {
-                    toolResult = await handleListGmailMessages(args as any, toolCtx);
-                  } else if (name === 'sendGmailMessage') {
-                    toolResult = await handleSendGmailMessage(args as any, toolCtx);
-                  } else if (name === 'listCalendarEvents') {
-                    toolResult = await handleListCalendarEvents(args as any, toolCtx);
-                  } else if (name === 'createCalendarEvent') {
-                    toolResult = await handleCreateCalendarEvent(args as any, toolCtx);
-                  } else if (name === 'listDriveFiles') {
-                    toolResult = await handleListDriveFiles(args as any, toolCtx);
-                  } else if (name === 'createGoogleDoc') {
-                    toolResult = await handleCreateGoogleDoc(args as any, toolCtx);
-                  } else if (name === 'createGoogleSheet') {
-                    toolResult = await handleCreateGoogleSheet(args as any, toolCtx);
-                  } else if (name === 'createGoogleSlide') {
-                    toolResult = await handleCreateGoogleSlide(args as any, toolCtx);
-                  } else if (name === 'createGoogleForm') {
-                    toolResult = await handleCreateGoogleForm(args as any, toolCtx);
-                  } else if (name === 'listGoogleForms') {
-                    toolResult = await handleListGoogleForms(args as any, toolCtx);
-                  } else if (name === 'listGoogleTasks') {
-                    toolResult = await handleListGoogleTasks(args as any, toolCtx);
-                  } else if (name === 'createGoogleTask') {
-                    toolResult = await handleCreateGoogleTask(args as any, toolCtx);
-                  } else if (name === 'listGoogleContacts') {
-                    toolResult = await handleListGoogleContacts(args as any, toolCtx);
-                  } else if (name === 'getGmailMessage') {
-                    toolResult = await handleGetGmailMessage(args as any, toolCtx);
-                  } else if (name === 'trashGmailMessage') {
-                    toolResult = await handleTrashGmailMessage(args as any, toolCtx);
-                  } else if (name === 'deleteGmailMessage') {
-                    toolResult = await handleDeleteGmailMessage(args as any, toolCtx);
-                  } else if (name === 'modifyGmailMessage') {
-                    toolResult = await handleModifyGmailMessage(args as any, toolCtx);
-                  } else if (name === 'createGmailDraft') {
-                    toolResult = await handleCreateGmailDraft(args as any, toolCtx);
-                  } else if (name === 'updateCalendarEvent') {
-                    toolResult = await handleUpdateCalendarEvent(args as any, toolCtx);
-                  } else if (name === 'deleteCalendarEvent') {
-                    toolResult = await handleDeleteCalendarEvent(args as any, toolCtx);
-                  } else if (name === 'updateGoogleTask') {
-                    toolResult = await handleUpdateGoogleTask(args as any, toolCtx);
-                  } else if (name === 'deleteGoogleTask') {
-                    toolResult = await handleDeleteGoogleTask(args as any, toolCtx);
-                  } else if (name === 'searchDriveFiles') {
-                    toolResult = await handleSearchDriveFiles(args as any, toolCtx);
-                  } else if (name === 'getDriveFile') {
-                    toolResult = await handleGetDriveFile(args as any, toolCtx);
-                  } else if (name === 'createDriveFile') {
-                    toolResult = await handleCreateDriveFile(args as any, toolCtx);
-                  } else if (name === 'updateDriveFileContent') {
-                    toolResult = await handleUpdateDriveFileContent(args as any, toolCtx);
-                  } else if (name === 'deleteDriveFile') {
-                    toolResult = await handleDeleteDriveFile(args as any, toolCtx);
-                  } else if (name === 'createGoogleContact') {
-                    toolResult = await handleCreateGoogleContact(args as any, toolCtx);
-                  } else if (name === 'updateGoogleContact') {
-                    toolResult = await handleUpdateGoogleContact(args as any, toolCtx);
-                  } else if (name === 'deleteGoogleContact') {
-                    toolResult = await handleDeleteGoogleContact(args as any, toolCtx);
-                  } else if (name === 'searchYoutube') {
-                    toolResult = await handleSearchYoutube(args as any, toolCtx);
-                  } else if (name === 'connectGoogleAccount') {
-                    toolResult = await handleConnectGoogleAccount(args as any, toolCtx);
-                  } else if (name === 'resolve_whatsapp_contact') {
-                    toolResult = await handleResolveWhatsAppContact(args as any, toolCtx);
-                  } else if (name === 'request_whatsapp_send') {
-                    toolResult = await handleRequestWhatsAppSend(args as any, toolCtx);
-                  } else if (name === 'send_whatsapp_text') {
-                    toolResult = await handleSendWhatsAppText(args as any, toolCtx);
-                  } else if (name === 'send_whatsapp_contact_card') {
-                    toolResult = await handleSendWhatsAppContactCard(args as any, toolCtx);
-                  } else if (name === 'send_whatsapp_message') {
-                    toolResult = await handleSendWhatsAppMessage(args as any, toolCtx);
-                  } else if (name === 'send_whatsapp_group_message') {
-                    toolResult = await handleSendWhatsAppGroupMessage(args as any, toolCtx);
-                  } else if (name === 'read_whatsapp_chats') {
-                    toolResult = await handleReadWhatsAppChats(args as any, toolCtx);
-                  } else if (name === 'get_whatsapp_contacts') {
-                    toolResult = await handleGetWhatsAppContacts(args as any, toolCtx);
-                  } else if (name === 'get_whatsapp_groups') {
-                    toolResult = await handleGetWhatsAppGroups(args as any, toolCtx);
-                  } else if (name === 'get_whatsapp_message_history') {
-                    toolResult = await handleGetWhatsAppMessageHistory(args as any, toolCtx);
-                  } else if (name === 'get_whatsapp_calls') {
-                    toolResult = await handleGetWhatsAppCalls(args as any, toolCtx);
-                  } else if (name === 'block_whatsapp_contact') {
-                    toolResult = await handleBlockWhatsAppContact(args as any, toolCtx);
-                  } else if (name === 'unblock_whatsapp_contact') {
-                    toolResult = await handleUnblockWhatsAppContact(args as any, toolCtx);
-                  } else if (name === 'read_whatsapp_attachment') {
-                    toolResult = await handleReadWhatsAppAttachment(args as any, toolCtx);
-                  } else if (name === 'transcribe_whatsapp_audio') {
-                    toolResult = await handleTranscribeWhatsAppAudio(args as any, toolCtx);
-                  } else if (name === 'send_whatsapp_document') {
-                    toolResult = await handleSendWhatsAppDocument(args as any, toolCtx);
-                  } else if (name === 'sync_whatsapp_history') {
-                    toolResult = await handleSyncWhatsAppHistory(args as any, toolCtx);
-                  } else if (name === 'whatsapp_call') {
-                    toolResult = await handleWhatsAppCall(args as any, toolCtx);
-                  } else if (name === 'remember_memory') {
-                    toolResult = await fetchMemoryAdd(args as any, toolCtx);
-                  } else if (name === 'recall_memory') {
-                    toolResult = await fetchMemorySearch(args as any, toolCtx);
-                  } else if (name === 'get_core_memory') {
-                    toolResult = await fetchCoreRead(args as any, toolCtx);
-                  } else {
-                    toolResult = { error: `Unknown tool name: ${name}` };
-                  }
+                  toolResult = await dispatchTool(name, args, toolCtx);
                 } catch (err: any) {
                   toolResult = { error: err.message || 'Tool execution failed' };
                 }
@@ -2195,7 +2068,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
 }
 
 process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err?.stack || err);
+  logger.error({ err: err?.stack || String(err) }, 'uncaughtException');
   // Fatal bind conflicts (EADDRINUSE from a competing instance) must kill the
   // process so the supervisor can restart it cleanly.
   const msg = err?.message || String(err);
@@ -2204,74 +2077,10 @@ process.on('uncaughtException', (err) => {
   }
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason);
+  logger.error({ reason: String(reason) }, 'unhandledRejection');
 });
 
-// MemoryCore gateway integration handlers
-async function fetchMemoryAdd(body: any, toolCtx: any): Promise<any> {
-  const apiKey = process.env.TDAI_LLM_API_KEY || "beatrice-llm-proxy";
-  const serviceId = process.env.TDAI_LLM_SERVICE_ID || "beatrice-memory";
-  const payload = {
-    session_id: body?.session_id,
-    messages: body?.messages,
-  };
-  const res = await fetch("http://127.0.0.1:8420/v2/conversation/add", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "x-tdai-service-id": serviceId,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
-  return { ok: true, data };
-}
-
-async function fetchMemorySearch(body: any, toolCtx: any): Promise<any> {
-  const apiKey = process.env.TDAI_LLM_API_KEY || "beatrice-llm-proxy";
-  const serviceId = process.env.TDAI_LLM_SERVICE_ID || "beatrice-memory";
-  const payload = {
-    query: body?.query,
-    limit: body?.limit ?? 5,
-    session_id: body?.session_id,
-  };
-  const res = await fetch("http://127.0.0.1:8420/v2/conversation/search", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "x-tdai-service-id": serviceId,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
-  return { ok: true, data };
-}
-
-async function fetchCoreRead(body: any, toolCtx: any): Promise<any> {
-  const apiKey = process.env.TDAI_LLM_API_KEY || "beatrice-llm-proxy";
-  const serviceId = process.env.TDAI_LLM_SERVICE_ID || "beatrice-memory";
-  const payload = {
-    version: body?.version,
-  };
-  const res = await fetch("http://127.0.0.1:8420/v2/core/read", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "x-tdai-service-id": serviceId,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
-  return { ok: true, data };
-}
-
 startServer().catch((err) => {
-  console.error('Fatal startServer error:', err);
+  logger.error({ err: err?.message || String(err) }, 'Fatal startServer error');
   process.exit(1);
 });
