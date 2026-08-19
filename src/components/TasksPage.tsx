@@ -99,7 +99,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
         status: CODING_STATUS[s.status] || 'pending',
         progress: s.status === 'completed' || s.status === 'failed' || s.status === 'cancelled' ? 100 : 30,
         prompt: s.task,
-        result: s.output || s.log.slice(-20).join('\n'),
+        result: s.output || (s.log || []).slice(-20).join('\n'),
         error: s.error,
         timestamp: s.timestamp,
       });
@@ -212,7 +212,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
           <div className="flex items-center gap-2 text-xs">
             <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />
             <span className="text-[#8e8e93]">
-              {Math.round(activeTasks[0].progress)}% complete
+              {Math.round(activeTasks[0].progress || 0)}% complete
             </span>
           </div>
         )}
@@ -281,7 +281,9 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                       {task.title}
                     </p>
                     <p className="text-[10px] text-[#8e8e93] line-clamp-1">
-                      {task.prompt.substring(0, 80)}{task.prompt.length > 80 ? '…' : ''}
+                      {task.prompt
+                        ? task.prompt.substring(0, 80) + (task.prompt.length > 80 ? '…' : '')
+                        : 'No prompt recorded'}
                     </p>
                   </div>
 
@@ -308,7 +310,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                           className={`h-full rounded-full transition-all duration-300 ${getProgressColor(
                             task.progress
                           )}`}
-                          style={{ width: `${task.progress}%` }}
+                          style={{ width: `${task.progress || 0}%` }}
                         />
                       </div>
                     )}

@@ -1261,7 +1261,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                         <span className="text-[#8e8e93]">{new Date(s.timestamp).toLocaleTimeString()}</span>
                       </div>
                     </div>
-                    <div className="text-[11px] text-[#8e8e93]">Task: {s.task.slice(0, 120)}</div>
+                    <div className="text-[11px] text-[#8e8e93]">Task: {s.task ? s.task.slice(0, 120) : '—'}</div>
                     <div className="text-[10px] text-[#8e8e93]">cwd: {s.cwd}</div>
                     {s.error && (
                       <div className="p-2 rounded bg-rose-500/10 border border-rose-500/20 text-[10px] text-rose-400">
@@ -1269,7 +1269,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                       </div>
                     )}
                     <pre className="p-2 rounded bg-[#121215] border border-white/10 text-[10px] text-[#8e8e93] max-h-60 overflow-y-auto font-mono leading-relaxed">
-                      {s.output || s.log.slice(-40).join('\n') || 'Waiting for output...'}
+                      {s.output || (s.log || []).slice(-40).join('\n') || 'Waiting for output...'}
                     </pre>
                     {s.status === 'running' && (
                       <button

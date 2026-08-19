@@ -538,6 +538,9 @@ export default function App() {
       console.log('Connected to Beatrice Live WebSocket bridge.');
       // Mark any active tasks stale if no updates arrived during disconnect
       generation.handleSocketReconnected();
+      // Pull any tasks (video/image/audio/coding) that were broadcast while the
+      // socket was down (background tab, network blip) so nothing is lost.
+      void generation.syncFromServer().catch(() => {});
       // Successful connection: reset backoff counter
       reconnectAttemptRef.current = 0;
       setStatus('connecting');
@@ -813,17 +816,27 @@ export default function App() {
             break;
           }
 
-          case 'codingAgentUpdate':
+          case 'codingAgentUpdate': {
+            const s = (msg.session || {}) as any;
+            const sanitized = {
+              ...s,
+              id: typeof s.id === 'string' ? s.id : 'ca_' + Date.now(),
+              task: typeof s.task === 'string' ? s.task : '',
+              log: Array.isArray(s.log) ? s.log : [],
+              output: typeof s.output === 'string' ? s.output : '',
+              error: typeof s.error === 'string' ? s.error : '',
+            };
             setCodingAgentSessions((prev) => {
-              const idx = prev.findIndex((s) => s.id === msg.session.id);
+              const idx = prev.findIndex((x) => x.id === sanitized.id);
               if (idx > -1) {
                 const updated = [...prev];
-                updated[idx] = msg.session;
+                updated[idx] = sanitized;
                 return updated;
               }
-              return [msg.session, ...prev];
+              return [sanitized, ...prev];
             });
             break;
+          }
 
           case 'codingAgentStream': {
             setCodingAgentSessions((prev) => {
@@ -873,27 +886,47 @@ export default function App() {
             break;
 
           case 'videoGenerationUpdate': {
+            // Sanitize before storing: broadcasts from the server may omit
+            // prompt/progress (e.g. failure fallbacks) and the task list
+            // renders must never crash on undefined fields.
+            const t = (msg.task || {}) as any;
+            const sanitized: VideoGenerationTask = {
+              ...t,
+              id: typeof t.id === 'string' ? t.id : 'vid_' + Date.now(),
+              prompt: typeof t.prompt === 'string' ? t.prompt : '',
+              progress: typeof t.progress === 'number' ? t.progress : 0,
+              result: typeof t.result === 'string' ? t.result : '',
+            };
             setVideoTasks((prev) => {
-              const idx = prev.findIndex((t) => t.id === msg.task.id);
+              const idx = prev.findIndex((x) => x.id === sanitized.id);
               if (idx > -1) {
                 const updated = [...prev];
-                updated[idx] = msg.task;
+                updated[idx] = sanitized;
                 return updated;
               }
-              return [msg.task, ...prev];
+              return [sanitized, ...prev];
             });
             break;
           }
 
           case 'qwencloudUpdate': {
+            const t = (msg.task || {}) as any;
+            const sanitized: QwenCloudTask = {
+              ...t,
+              id: typeof t.id === 'string' ? t.id : 'qwen_' + Date.now(),
+              kind: t.kind || 'chat',
+              prompt: typeof t.prompt === 'string' ? t.prompt : '',
+              progress: typeof t.progress === 'number' ? t.progress : 0,
+              result: typeof t.result === 'string' ? t.result : '',
+            };
             setQwenTasks((prev) => {
-              const idx = prev.findIndex((t) => t.id === msg.task.id);
+              const idx = prev.findIndex((x) => x.id === sanitized.id);
               if (idx > -1) {
                 const updated = [...prev];
-                updated[idx] = msg.task;
+                updated[idx] = sanitized;
                 return updated;
               }
-              return [msg.task, ...prev];
+              return [sanitized, ...prev];
             });
             break;
           }
@@ -1092,7 +1125,46 @@ export default function App() {
   useEffect(() => {
     if (!gatePassed) return;
     connectWebSocket();
+
+    // Keep the bridge alive while the tab is hidden: browsers throttle timers
+    // in background tabs, so a lightweight ping (ignored by the server, which
+    // only reacts to known message types) stops proxies from dropping the idle
+    // socket mid-generation. The server-side generation keeps running in the
+    // background regardless; the ping only keeps the return channel open.
+    const keepalive = window.setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch {
+          // ignore
+        }
+      }
+    }, 30000);
+
+    // When the app comes back to the foreground, reconnect immediately instead
+    // of waiting on a backoff timer that was throttled while hidden — and sync
+    // any task updates that were broadcast while we were away.
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      const ws = wsRef.current;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      isManualDisconnectRef.current = false;
+      reconnectAttemptRef.current = 0;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      connectWebSocket();
+      void generation.syncFromServer().catch(() => {});
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      window.clearInterval(keepalive);
+      document.removeEventListener('visibilitychange', handleVisibility);
       isManualDisconnectRef.current = true;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);

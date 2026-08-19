@@ -221,7 +221,10 @@ export function useGenerationTasks() {
    * Merge the server-side task history into the local store. Restores
    * unfinished (queued/processing) tasks after a refresh/restart and imports
    * tasks created by other sessions or the Gemini tool loop. Local entries
-   * always win — realtime WS patches are fresher than persisted snapshots.
+   * always win — realtime WS patches are fresher than persisted snapshots —
+   * EXCEPT stale local tasks (no live update for a while, e.g. while the tab
+   * was in the background), which are replaced by the authoritative server
+   * snapshot so a generation that finished during the gap is not lost.
    */
   const syncFromServer = useCallback(async () => {
     let serverTasks: ServerTask[];
@@ -235,7 +238,8 @@ export function useGenerationTasks() {
     setTasks((prev) => {
       const byId = new Map<string, GenerationTask>(prev.map((t) => [t.id, t]));
       for (const st of serverTasks) {
-        if (byId.has(st.id)) continue;
+        const existing = byId.get(st.id);
+        if (existing && !existing.stale) continue;
         const gt = serverTaskToGenerationTask(st);
         byId.set(gt.id, gt);
       }
