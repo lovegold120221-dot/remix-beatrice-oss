@@ -1,4 +1,5 @@
 import type { ToolContext } from './tools.js';
+export type { ToolContext } from './tools.js';
 import {
   handleDeployAgentTask,
   handleExecuteCodeSandbox,

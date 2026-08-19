@@ -37,7 +37,73 @@ import {
   Users,
   Video,
   Wrench,
+  Download,
+  Loader2,
 } from 'lucide-react';
+
+// Human-friendly label for an in-flight video/media task status.
+export const statusLabel = (status: string, kind?: string): string => {
+  switch (status) {
+    case 'submitting':
+      return 'Submitting to render engine…';
+    case 'queued':
+      return 'Queued — waiting for a render slot…';
+    case 'running':
+    case 'processing':
+    case 'pending':
+      return kind === 'video' ? 'Rendering your video…' : 'Working…';
+    case 'started':
+      return 'Starting up…';
+    case 'timeout':
+      return 'Taking longer than expected…';
+    default:
+      return status;
+  }
+};
+
+// Download the actual file (blob) instead of opening the URL in a tab.
+// Falls back to opening the URL if the fetch is blocked by CORS.
+export const downloadFile = async (url: string, filename: string) => {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objUrl);
+  } catch (err) {
+    console.warn('Direct download failed, opening in new tab instead:', err);
+    window.open(url, '_blank');
+  }
+};
+
+// Animated 16:9 placeholder shown while a video is being generated.
+export const VideoLoading: React.FC<{ status: string; progress: number; kind?: string }> = ({ status, progress }) => (
+  <div className="relative aspect-video rounded-lg overflow-hidden border border-white/10 bg-gradient-to-br from-[#0a0a0c] via-[#121215] to-[#0a0a0c]">
+    <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-[#00f2fe]/10 to-transparent" />
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5">
+      <div className="relative flex items-center justify-center">
+        <div className="absolute w-12 h-12 rounded-full bg-[#00f2fe]/25 blur-md animate-ping" />
+        <Loader2 className="w-7 h-7 text-[#00f2fe] animate-spin relative" />
+      </div>
+      <span className="text-[10px] font-medium text-[#8e8e93]">{statusLabel(status, 'video')}</span>
+      <span className="text-[10px] font-mono text-[#00f2fe]">{Math.min(100, Math.max(0, progress))}%</span>
+    </div>
+    <div className="absolute bottom-0 inset-x-0 h-1 bg-[#121215]">
+      <div className="h-full bg-gradient-to-r from-[#00f2fe] to-[#4facfe] transition-all duration-500" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
+    </div>
+  </div>
+);
+
+// Responsive media frame: full width on phones, centered cap on larger screens.
+export const MediaFrame: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className }) => (
+  <div className={`mx-auto w-full max-w-full sm:max-w-2xl lg:max-w-3xl ${className || ''}`}>{children}</div>
+);
 
 interface ToolsWorkbenchProps {
   toolLogs: ToolCallLog[];
@@ -101,6 +167,34 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
   // Google Workspace form state
   const [meetTitle, setMeetTitle] = useState<string>('Eburon AI Strategy & Google Meet Sync');
   const [meetLink, setMeetLink] = useState<string>('');
+  const [meetCreating, setMeetCreating] = useState(false);
+  const [meetError, setMeetError] = useState<string | null>(null);
+
+  const createGoogleMeet = async () => {
+    setMeetCreating(true);
+    setMeetError(null);
+    try {
+      // Create a REAL Google Meet via the server → Google Calendar API. Never
+      // fabricate a meet.google.com URL locally.
+      const res = await fetch('/api/workspace/meet/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary: meetTitle || 'Beatrice AI Strategy Session' }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.error || !data?.meetingUri) {
+        setMeetError(data?.error || `Could not create meeting (HTTP ${res.status})`);
+        setMeetLink('');
+        return;
+      }
+      setMeetLink(data.meetingUri);
+    } catch (err: any) {
+      setMeetError(err?.message || 'Could not create the meeting — Google Calendar is unavailable.');
+      setMeetLink('');
+    } finally {
+      setMeetCreating(false);
+    }
+  };
   const [gmailTo, setGmailTo] = useState<string>('team@eburon.ai');
   const [gmailSub, setGmailSub] = useState<string>('Beatrice OSS System Update');
   const [gmailBody, setGmailBody] = useState<string>('Hello,\n\nBeatrice AI Voice Assistant has integrated Google Workspace & Meet services.\n\nBest regards,\nBeatrice AI');
@@ -357,7 +451,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
           }`}
         >
           <Film className="w-3.5 h-3.5" />
-          <span>Video Gen</span>
+          <span>Video</span>
           {videoTasks.length > 0 && (
             <span className="px-1.5 py-0.2 rounded-full bg-[#4facfe]/25 text-[10px] text-[#00f2fe] font-bold">
               {videoTasks.length}
@@ -374,7 +468,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
           }`}
         >
           <Cloud className="w-3.5 h-3.5" />
-          <span>QwenCloud</span>
+          <span>Media Studio</span>
           {qwenTasks.length > 0 && (
             <span className="px-1.5 py-0.2 rounded-full bg-[#00f2fe]/25 text-[10px] text-[#00f2fe] font-bold">
               {qwenTasks.length}
@@ -525,18 +619,22 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
 
                 <div className="flex items-center gap-2 pt-1">
                   <button
-                    onClick={() => {
-                      const link = `https://meet.google.com/btr-${Math.random().toString(36).substring(2, 6)}-${Math.random().toString(36).substring(2, 6)}`;
-                      setMeetLink(link);
-                    }}
-                    className="flex-1 py-2 px-3 rounded-lg bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:from-[#4facfe] hover:to-[#00f2fe] text-black font-bold flex items-center justify-center gap-2 transition-all shadow-md shadow-[#00f2fe]/20 cursor-pointer"
+                    onClick={createGoogleMeet}
+                    disabled={meetCreating}
+                    className="flex-1 py-2 px-3 rounded-lg bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:from-[#4facfe] hover:to-[#00f2fe] disabled:opacity-50 text-black font-bold flex items-center justify-center gap-2 transition-all shadow-md shadow-[#00f2fe]/20 cursor-pointer"
                   >
                     <Video className="w-3.5 h-3.5" />
-                    <span>Create Google Meet Space</span>
+                    <span>{meetCreating ? 'Creating meeting…' : 'Create Google Meet Space'}</span>
                   </button>
                 </div>
 
-                {meetLink && (
+                {meetError && (
+                  <div className="mt-2 p-3 rounded-lg bg-rose-950/30 border border-rose-500/30 text-rose-300 text-[11px]">
+                    {meetError}
+                  </div>
+                )}
+
+                {meetLink && !meetError && (
                   <div className="mt-2 p-3 rounded-lg bg-black border border-[#00f2fe]/40 space-y-2 animate-fadeIn">
                     <span className="text-[10px] font-semibold uppercase text-[#00f2fe] tracking-wider block">
                       ✓ Google Meet Room Generated:
@@ -1191,16 +1289,16 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
         {/* TAB 8: VIDEO GENERATION */}
         {activeTab === 'video' && (
           <div className="space-y-4">
-            <div className="p-3 rounded-xl bg-[#4facfe]/10 border border-[#4facfe]/30 space-y-2">
+            <div className="p-3 rounded-xl bg-[#00f2fe]/10 border border-[#00f2fe]/30 space-y-2">
               <div className="flex items-center gap-2 text-[#00f2fe] font-semibold text-xs">
                 <Film className="w-4 h-4" />
-                <span>DashScope Video Generation</span>
+                <span>Video Generation</span>
               </div>
               <textarea
                 value={videoPrompt}
                 onChange={(e) => setVideoPrompt(e.target.value)}
-                rows={5}
-                className="w-full px-3 py-2 rounded-lg bg-black border border-white/10 text-zinc-200 text-xs focus:outline-none focus:border-[#4facfe]/50 resize-none"
+                rows={4}
+                className="w-full px-3 py-2 rounded-lg bg-black border border-white/10 text-zinc-200 text-xs focus:outline-none focus:border-[#00f2fe]/50 resize-none"
                 placeholder="Describe the video scene or multi-shot story..."
               />
               <div className="grid grid-cols-3 gap-2">
@@ -1240,66 +1338,63 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                     duration: videoDuration,
                   })
                 }
-                className="w-full py-2 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 text-white text-xs font-semibold transition-all flex items-center justify-center gap-1.5"
+                className="w-full py-2 rounded-lg bg-[#00f2fe]/15 hover:bg-[#00f2fe]/25 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold flex items-center justify-center gap-1.5"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                Generate Video with DashScope
+                Generate Video
               </button>
             </div>
 
             <div className="space-y-2.5">
-              <h4 className="text-xs font-medium text-[#8e8e93]">Video Generation Tasks</h4>
+              <h4 className="text-xs font-medium text-[#8e8e93]">Live Video Tasks</h4>
               {videoTasks.length === 0 ? (
                 <div className="p-4 rounded-xl bg-black border border-white/10 text-xs text-[#8e8e93] text-center">
-                  No video generation tasks yet. Ask Beatrice to create a video or use the form above.
+                  No video tasks yet. Start one above or ask Beatrice to create a video.
                 </div>
               ) : (
-                videoTasks.map((task) => (
-                  <div
-                    key={task.id}
-                    className="p-3 rounded-xl bg-black border border-white/10 space-y-2"
-                  >
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-mono text-[#4facfe]">{task.id}</span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                          task.status === 'completed'
-                            ? 'bg-emerald-500/20 text-emerald-400 border border-[#00f2fe]/30'
-                            : task.status === 'failed'
-                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                            : 'bg-[#4facfe]/15 text-[#00f2fe] border border-[#4facfe]/30 animate-pulse'
-                        }`}
-                      >
-                        {task.status}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-[#8e8e93] line-clamp-2">{task.prompt}</p>
-                    <div className="w-full bg-[#121215] h-1.5 rounded-full overflow-hidden">
-                      <div
-                        className="bg-gradient-to-r from-[#00f2fe] to-[#4facfe] h-full transition-all duration-500"
-                        style={{ width: `${task.progress}%` }}
-                      />
-                    </div>
-                    {task.videoUrl && (
-                      <div className="space-y-1">
-                        <video
-                          src={task.videoUrl}
-                          controls
-                          className="w-full rounded-lg border border-white/10"
-                        />
-                        <a
-                          href={task.videoUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[11px] text-[#4facfe] hover:underline block truncate"
-                        >
-                          {task.videoUrl}
-                        </a>
+                videoTasks.map((task) => {
+                  const progress = typeof task.progress === 'number' ? task.progress : 0;
+                  const isDone = task.status === 'completed' || task.status === 'done';
+                  const isFailed = task.status === 'failed';
+                  const videoUrl = typeof task.videoUrl === 'string' && task.videoUrl ? task.videoUrl : '';
+                  const dlUrl = typeof task.downloadUrl === 'string' && task.downloadUrl ? task.downloadUrl : videoUrl;
+                  return (
+                    <div key={task.id} className="p-3 rounded-xl bg-black border border-white/10 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-mono text-[#00f2fe] truncate">{task.id}</span>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${isDone ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : isFailed ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-[#00f2fe]/15 text-[#00f2fe] border border-[#00f2fe]/30 animate-pulse'}`}>
+                            {task.status}
+                          </span>
+                          {typeof task.timestamp === 'number' && (
+                            <span className="text-[#8e8e93]">{new Date(task.timestamp).toLocaleTimeString()}</span>
+                          )}
+                        </div>
                       </div>
-                    )}
-                    {task.error && <div className="text-[11px] text-rose-400">{task.error}</div>}
-                  </div>
-                ))
+                      {typeof task.prompt === 'string' && task.prompt && (
+                        <p className="text-[11px] text-[#8e8e93] line-clamp-2">{task.prompt}</p>
+                      )}
+                      {!isDone && !isFailed && <VideoLoading status={task.status} progress={progress} />}
+                      {videoUrl && (
+                        <MediaFrame>
+                          <video src={videoUrl} controls playsInline webkitPlaysInline className="w-full aspect-video object-contain bg-black rounded-lg border border-white/10" />
+                          <a
+                            href={dlUrl}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              void downloadFile(dlUrl, `${task.id}.mp4`);
+                            }}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00f2fe]/15 border border-[#00f2fe]/40 text-[#00f2fe] text-[11px] font-semibold hover:bg-[#00f2fe]/25 transition-colors"
+                          >
+                            <Download className="w-3 h-3" />
+                            Download
+                          </a>
+                        </MediaFrame>
+                      )}
+                      {typeof task.error === 'string' && task.error && <div className="text-[11px] text-rose-400">{task.error}</div>}
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
@@ -1311,7 +1406,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
             <div className="p-3 rounded-xl bg-[#00f2fe]/10 border border-[#00f2fe]/30 space-y-2">
               <div className="flex items-center gap-2 text-[#00f2fe] font-semibold text-xs">
                 <Cloud className="w-4 h-4" />
-                <span>QwenCloud Multi-Modal Tools</span>
+                <span>Media Studio</span>
               </div>
               <div className="flex gap-2 overflow-x-auto pb-1">
                 {(['chat', 'image', 'imageEdit', 'video', 'tts'] as const).map((t) => (
@@ -1342,7 +1437,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                     value={qwenPrompt}
                     onChange={(e) => setQwenPrompt(e.target.value)}
                     rows={3}
-                    placeholder="Prompt for QwenCloud chat..."
+                    placeholder="Prompt for text generation..."
                     className="w-full px-3 py-2 rounded-lg bg-black border border-white/10 text-zinc-200 text-xs resize-none focus:outline-none"
                   />
                   <select
@@ -1356,7 +1451,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                   </select>
                   <button
                     onClick={() => onQwenCloud?.('chat', { prompt: qwenPrompt, model: qwenModel, system: qwenSystem })}
-                    className="w-full py-2 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="w-full py-2 rounded-lg bg-[#00f2fe]/15 hover:bg-[#00f2fe]/25 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold flex items-center justify-center gap-1.5"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" /> Send Chat
                   </button>
@@ -1410,7 +1505,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                         size: qwenSize,
                       })
                     }
-                    className="w-full py-2 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="w-full py-2 rounded-lg bg-[#00f2fe]/15 hover:bg-[#00f2fe]/25 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold flex items-center justify-center gap-1.5"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
                     {qwenTab === 'image' ? 'Generate Image' : 'Edit Images'}
@@ -1464,7 +1559,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                         duration: qwenDuration,
                       })
                     }
-                    className="w-full py-2 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="w-full py-2 rounded-lg bg-[#00f2fe]/15 hover:bg-[#00f2fe]/25 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold flex items-center justify-center gap-1.5"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" /> Generate Video
                   </button>
@@ -1489,7 +1584,7 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
                   />
                   <button
                     onClick={() => onQwenCloud?.('tts', { text: qwenPrompt, voice: qwenVoice })}
-                    className="w-full py-2 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="w-full py-2 rounded-lg bg-[#00f2fe]/15 hover:bg-[#00f2fe]/25 text-[#00f2fe] border border-[#00f2fe]/30 text-xs font-semibold flex items-center justify-center gap-1.5"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" /> Synthesize Speech
                   </button>
@@ -1498,139 +1593,101 @@ export const ToolsWorkbench: React.FC<ToolsWorkbenchProps> = ({
             </div>
 
             <div className="space-y-2.5">
-              <h4 className="text-xs font-medium text-[#8e8e93]">QwenCloud Tasks</h4>
+              <h4 className="text-xs font-medium text-[#8e8e93]">Live Media Tasks</h4>
               {qwenTasks.length === 0 ? (
                 <div className="p-4 rounded-xl bg-black border border-white/10 text-xs text-[#8e8e93] text-center">
-                  No QwenCloud tasks yet. Ask Beatrice to create image, video, speech, or chat via QwenCloud.
+                  No media tasks yet. Ask Beatrice to create an image, video, or speech.
                 </div>
               ) : (
-                qwenTasks.map((task) => (
-                  <div key={task.id} className="p-3 rounded-xl bg-black border border-white/10 space-y-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-mono text-[#00f2fe]">{task.id}</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-[#00f2fe]/15 text-[#00f2fe] border border-[#00f2fe]/30">{task.kind} · {task.status}</span>
-                    </div>
-                    <p className="text-[11px] text-[#8e8e93] line-clamp-2">{task.prompt}</p>
-                    <div className="w-full bg-[#121215] h-1.5 rounded-full overflow-hidden">
-                      <div
-                        className="bg-gradient-to-r from-[#00f2fe] to-[#4facfe] h-full transition-all duration-500"
-                        style={{ width: `${task.progress}%` }}
-                      />
-                    </div>
-                    {task.urls?.map((url, i) => {
-                      const isImage = task.kind === 'image' || task.kind === 'imageEdit';
-                      const isVideo = task.kind === 'video';
-                      const urlExt = url.split('.').pop().split('?')[0];
-                      const urlType = (urlExt || '').toLowerCase();
-
-                      return (
-                        <div key={i} className="space-y-1">
-                          {isImage ? (
-                            <img
-                              src={url}
-                              alt="qwen output"
-                              className="w-full rounded-lg border border-white/10"
-                            />
-                          ) : isVideo ? (
-                            <video
-                              src={url}
-                              controls
-                              className="w-full rounded-lg border border-white/10"
-                            />
-                          ) : urlType && /\.(mp4|mov|webm|avi|mkv)$/i.test(url)
-                            ? (
-                                <video
-                                  src={url}
-                                  controls
-                                  className="w-full rounded-lg border border-white/10"
-                                />
-                              )
-                            : urlType && /\.(png|jpg|jpeg|webp|gif|svg)$/i.test(url)
-                              ? (
-                                  <img
-                                    src={url}
-                                    alt="qwen output"
-                                    className="w-full rounded-lg border border-white/10"
-                                  />
-                                )
-                              : null}
-                          <div className="flex items-center justify-between text-xs">
-                            <a
-                              href={url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-[10px] text-[#8e8e93] truncate"
-                            >
-                              {url.length > 50 ? url.slice(0, 50) + '…' : url}
-                            </a>
-                            {(task.firebaseUrls || []).map((furl, j) => (
-                              <span
-                                key={j}
-                                className="text-[10px] text-[#00c8ff] ml-1"
-                              >
-                                <a
-                                  href={furl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="font-mono"
-                                >
-                                  Firebase ⚡
-                                </a>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {task.audioUrl && (
-                      <div className="space-y-1">
-                        <audio
-                          src={task.audioUrl}
-                          controls
-                          className="w-full rounded-lg border border-white/10"
-                        />
-                        <div className="flex items-center justify-between text-xs mt-1">
-                          <a
-                            href={task.audioUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[10px] text-[#8e8e93] truncate"
-                          >
-                            {task.audioUrl.length > 50 ? task.audioUrl.slice(0, 50) + '…' : task.audioUrl}
-                          </a>
-                          {task.firebaseAudioUrl && (
-                            <a
-                              href={task.firebaseAudioUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-[10px] text-[#00c8ff] font-mono"
-                            >
-                              Firebase ⚡
-                            </a>
+                qwenTasks.map((task) => {
+                  const progress = typeof task.progress === 'number' ? task.progress : 0;
+                  const isDone = task.status === 'completed' || task.status === 'done';
+                  const isFailed = task.status === 'failed';
+                  const isVideoKind = task.kind === 'video';
+                  const isImageKind = task.kind === 'image' || task.kind === 'imageEdit';
+                  const urls = ((task.urls as string[] | undefined) ?? []).filter((u): u is string => typeof u === 'string' && u.length > 0);
+                  const firebaseUrls = ((task.firebaseUrls as string[] | undefined) ?? []).filter((u): u is string => typeof u === 'string' && u.length > 0);
+                  const audioUrl = typeof task.audioUrl === 'string' && task.audioUrl ? task.audioUrl : '';
+                  const firebaseAudioUrl = typeof task.firebaseAudioUrl === 'string' && task.firebaseAudioUrl ? task.firebaseAudioUrl : '';
+                  return (
+                    <div key={task.id} className="p-3 rounded-xl bg-black border border-white/10 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-mono text-[#00f2fe] truncate">{task.id}</span>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-[#00f2fe]/15 text-[#00f2fe] border border-[#00f2fe]/30">{task.kind}</span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded font-semibold ${isDone ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : isFailed ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-[#00f2fe]/15 text-[#00f2fe] border border-[#00f2fe]/30 animate-pulse'}`}>
+                            {task.status}
+                          </span>
+                          {typeof task.timestamp === 'number' && (
+                            <span className="text-[#8e8e93]">{new Date(task.timestamp).toLocaleTimeString()}</span>
                           )}
                         </div>
                       </div>
-                    )}
-                    {task.firebaseAudioUrl && (
-                      <div className="mt-1 text-right text-[10px] text-[#00c8ff]">
-                        <a
-                          href={task.firebaseAudioUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="font-mono"
-                        >
-                          Audio: Firebase ⚡
-                        </a>
-                      </div>
-                    )}
-                    {task.result && (
-                      <div className="p-2 rounded bg-[#121215] border border-white/10 text-[10px] text-zinc-300 max-h-32 overflow-y-auto">
-                        <div className="whitespace-pre-wrap">{task.result}</div>
-                      </div>
-                    )}
-                    {task.error && <div className="text-[11px] text-rose-400">{task.error}</div>}
-                  </div>
-                ))
+                      {typeof task.prompt === 'string' && task.prompt && (
+                        <p className="text-[11px] text-[#8e8e93] line-clamp-2">{task.prompt}</p>
+                      )}
+                      {!isDone && !isFailed && (
+                        isVideoKind ? (
+                          <VideoLoading status={task.status} progress={progress} kind="video" />
+                        ) : (
+                          <div className="w-full bg-[#121215] h-1.5 rounded-full overflow-hidden">
+                            <div className="bg-[#00f2fe] h-full transition-all duration-500" style={{ width: `${progress}%` }} />
+                          </div>
+                        )
+                      )}
+                      {urls.map((url, i) => {
+                        const ext = String(url).split('.').pop()?.split('?')[0] || '';
+                        const urlType = ext.toLowerCase();
+                        const firebaseUrl = firebaseUrls[i] || '';
+                        const dlUrl = typeof task.downloadUrls?.[i] === 'string' && task.downloadUrls[i]
+                          ? task.downloadUrls[i]
+                          : firebaseUrl || url;
+                        // Prefer the persistent Firebase Storage copy (DashScope URLs expire).
+                        const src = ((isVideoKind || isImageKind || /\.(mp4|mov|webm|avi|mkv)$/i.test(urlType) || /\.(png|jpg|jpeg|webp|gif|svg)$/i.test(urlType)) && firebaseUrl) ? firebaseUrl : url;
+                        const mediaCls = 'w-full aspect-video object-contain bg-black rounded-lg border border-white/10';
+                        return (
+                          <MediaFrame key={i} className="space-y-1">
+                            {isImageKind || /\.(png|jpg|jpeg|webp|gif|svg)$/i.test(urlType) ? (
+                              <img src={src} alt="media output" className="w-full rounded-lg border border-white/10 object-contain bg-black" />
+                            ) : isVideoKind || /\.(mp4|mov|webm|avi|mkv)$/i.test(urlType) ? (
+                              <video src={src} controls playsInline webkitPlaysInline className={mediaCls} />
+                            ) : null}
+                            <a
+                              href={dlUrl}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                void downloadFile(dlUrl, `${task.id}-${i + 1}${ext ? '.' + ext : '.bin'}`);
+                              }}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00f2fe]/15 border border-[#00f2fe]/40 text-[#00f2fe] text-[11px] font-semibold hover:bg-[#00f2fe]/25 transition-colors"
+                            >
+                              <Download className="w-3 h-3" />
+                              Download
+                            </a>
+                          </MediaFrame>
+                        );
+                      })}
+                      {audioUrl && (
+                        <div className="space-y-1">
+                          <audio src={audioUrl} controls className="w-full rounded-lg border border-white/10" />
+                          <a
+                            href={firebaseAudioUrl || audioUrl}
+                            download={firebaseAudioUrl ? undefined : `${task.id}.mp3`}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00f2fe]/15 border border-[#00f2fe]/40 text-[#00f2fe] text-[11px] font-semibold hover:bg-[#00f2fe]/25 transition-colors"
+                          >
+                            <Download className="w-3 h-3" />
+                            Download
+                          </a>
+                        </div>
+                      )}
+                      {typeof task.result === 'string' && task.result && (
+                        <div className="p-2 rounded bg-[#121215] border border-white/10 text-[10px] text-zinc-300 max-h-32 overflow-y-auto">
+                          <div className="whitespace-pre-wrap">{task.result}</div>
+                        </div>
+                      )}
+                      {typeof task.error === 'string' && task.error && <div className="text-[11px] text-rose-400">{task.error}</div>}
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>

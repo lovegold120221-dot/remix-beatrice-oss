@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { X, Loader2, Monitor, ListChecks } from 'lucide-react';
+import { X, Loader2, Monitor, ListChecks, Download } from 'lucide-react';
 import { AgentTask, BrowserStreamSession, CliCommandRun, CodeSandboxRun, CodingAgentSession, ComputerStreamSession, VideoGenerationTask, QwenCloudTask } from '../types';
 import { ExecutionViewport } from './ExecutionViewport';
+import { VideoLoading, downloadFile, MediaFrame } from './ToolsWorkbench';
 
 interface TaskStatusInfo {
   id: string;
@@ -11,6 +12,10 @@ interface TaskStatusInfo {
   progress: number;
   prompt: string;
   result?: string;
+  videoUrl?: string;
+  downloadUrl?: string;
+  imageUrl?: string;
+  audioUrl?: string;
   error?: string;
   timestamp: number;
 }
@@ -108,7 +113,8 @@ export const TasksPage: React.FC<TasksPageProps> = ({
         status: t.status === 'completed' ? 'completed' : t.status === 'failed' ? 'failed' : 'running',
         progress: t.progress,
         prompt: t.prompt,
-        result: t.videoUrl,
+        videoUrl: t.videoUrl,
+        downloadUrl: t.downloadUrl || t.videoUrl,
         error: t.error,
         timestamp: t.timestamp,
       });
@@ -140,7 +146,12 @@ export const TasksPage: React.FC<TasksPageProps> = ({
         status,
         progress: t.progress,
         prompt: t.prompt,
-        result: t.result || (t.urls && t.urls[0]) || t.audioUrl,
+        // Prefer the persistent Firebase Storage copy (DashScope URLs expire).
+        videoUrl: t.kind === 'video' ? (t.firebaseUrls?.[0] || t.urls?.[0]) : undefined,
+        downloadUrl: t.kind === 'video' ? (t.firebaseUrls?.[0] || t.urls?.[0]) : undefined,
+        imageUrl: t.kind === 'image' || t.kind === 'imageEdit' ? (t.firebaseUrls?.[0] || t.urls?.[0]) : undefined,
+        audioUrl: t.kind === 'tts' ? (t.audioUrl || undefined) : undefined,
+        result: t.result || (t.kind === 'chat' ? (t.urls && t.urls[0]) || undefined : undefined),
         error: t.error,
         timestamp: t.timestamp,
       });
@@ -303,12 +314,54 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                     )}
 
                     {/* Result preview (for completed tasks) */}
-                    {task.status === 'completed' && task.result && (
+                    {task.status === 'completed' && task.kind === 'video' && task.videoUrl && (
+                      <MediaFrame className="mt-3 space-y-2">
+                        <video src={task.videoUrl} controls playsInline webkitPlaysInline className="w-full aspect-video object-contain bg-black rounded-lg border border-white/10" />
+                        <button
+                          onClick={() => void downloadFile(task.downloadUrl || task.videoUrl || '', `${task.id}.mp4`)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00f2fe]/15 border border-[#00f2fe]/40 text-[#00f2fe] text-[11px] font-semibold hover:bg-[#00f2fe]/25 transition-colors cursor-pointer"
+                        >
+                          <Download className="w-3 h-3" />
+                          Download
+                        </button>
+                      </MediaFrame>
+                    )}
+                    {task.status === 'completed' && task.kind === 'image' && task.imageUrl && (
+                      <MediaFrame className="mt-3 space-y-2">
+                        <img src={task.imageUrl} alt="media output" className="w-full rounded-lg border border-white/10 object-contain bg-black" />
+                        <button
+                          onClick={() => void downloadFile(task.imageUrl || '', `${task.id}.png`)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00f2fe]/15 border border-[#00f2fe]/40 text-[#00f2fe] text-[11px] font-semibold hover:bg-[#00f2fe]/25 transition-colors cursor-pointer"
+                        >
+                          <Download className="w-3 h-3" />
+                          Download
+                        </button>
+                      </MediaFrame>
+                    )}
+                    {task.status === 'completed' && task.kind === 'tts' && task.audioUrl && (
+                      <MediaFrame className="mt-3 space-y-2">
+                        <audio src={task.audioUrl} controls className="w-full" />
+                        <button
+                          onClick={() => void downloadFile(task.audioUrl || '', `${task.id}.mp3`)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00f2fe]/15 border border-[#00f2fe]/40 text-[#00f2fe] text-[11px] font-semibold hover:bg-[#00f2fe]/25 transition-colors cursor-pointer"
+                        >
+                          <Download className="w-3 h-3" />
+                          Download
+                        </button>
+                      </MediaFrame>
+                    )}
+                    {task.status === 'completed' && task.result && task.kind !== 'video' && task.kind !== 'image' && task.kind !== 'tts' && (
                       <div className="mt-3 text-[10px] text-[#8e8e93] line-clamp-2 max-h-24">
                         {typeof task.result === 'string'
                           ? task.result.substring(0, 120) + (task.result.length > 120 ? '…' : '')
                           : 'Result generated'}
                       </div>
+                    )}
+                    {/* Loading animation for in-flight video generation */}
+                    {task.status === 'running' && task.kind === 'video' && (
+                      <MediaFrame className="mt-3">
+                        <VideoLoading status="processing" progress={task.progress} kind="video" />
+                      </MediaFrame>
                     )}
                   </div>
                 </div>

@@ -11,13 +11,20 @@ import {
   User,
   X,
 } from 'lucide-react';
+import { InlineTaskCard } from '../components/generation/InlineTaskCard';
 import { AttachmentInfo, TranscriptItem } from '../types';
+import { isTaskActive } from '../types/generation';
 
 interface TranscriptsViewProps {
   transcripts: TranscriptItem[];
   onSendTextMessage: (text: string, attachment?: AttachmentInfo) => void;
   onClearTranscripts?: () => void;
   isConnected: boolean;
+  tasks?: {
+    tasks: import('../types/generation').GenerationTask[];
+    recentTasks: import('../types/generation').GenerationTask[];
+    onOpenActivity: (id: string) => void;
+  };
 }
 
 export const TranscriptsView: React.FC<TranscriptsViewProps> = ({
@@ -25,6 +32,7 @@ export const TranscriptsView: React.FC<TranscriptsViewProps> = ({
   onSendTextMessage,
   onClearTranscripts,
   isConnected,
+  tasks,
 }) => {
   const [inputText, setInputText] = useState('');
   const [attachment, setAttachment] = useState<AttachmentInfo | null>(null);
@@ -195,6 +203,26 @@ export const TranscriptsView: React.FC<TranscriptsViewProps> = ({
       </div>
 
       {/* Attachment Preview Banner if attached */}
+      <div className="p-4 space-y-2">
+        {tasks?.tasks
+          .filter(isTaskActive)
+          .slice(0, 6)
+          .map((t) => (
+            <InlineTaskCard key={t.id} task={t} />
+          ))}
+        {tasks?.recentTasks?.length > 0 && (
+          <>
+            <span className="text-xs text-zinc-500 capitalize">Recent</span>
+            {tasks?.recentTasks
+              .slice(0, 6)
+              .filter(isTaskActive)
+              .map((t) => (
+                <InlineTaskCard key={t.id} task={t} />
+              ))}
+          </>
+        )}
+      </div>
+
       {attachment && (
         <div className="px-4 py-2 bg-black/80 border-t border-white/10 flex items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2 overflow-hidden">

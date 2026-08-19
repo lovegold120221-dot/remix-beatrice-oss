@@ -11,10 +11,38 @@ import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
 } from 'firebase/auth';
-import { auth, googleProvider, db } from '../lib/firebase';
-import { ref, update, remove } from 'firebase/database';
+import { auth, googleProvider, db, GOOGLE_SCOPES, oAuthClientId } from '../lib/firebase';
+import { ref, update, remove, get } from 'firebase/database';
 
 const TOKEN_STORAGE_KEY = 'beatrice_google_access_token';
+
+// Renewal uses ONLY the Firebase-managed OAuth client (oAuthClientId): Firebase
+// auto-syncs its authorized JavaScript origins from the Firebase Auth
+// "Authorized domains" list (oss.eburon.ai is registered there), so the silent
+// `prompt: ''` flow never surfaces a popup. The manual web client from
+// google-web-credentials.json has NO registered origins and makes Google show
+// an "Access blocked / 401 invalid_client" card — it must not be used for
+// silent renewal on this origin.
+
+interface GsiTokenClient {
+  requestAccessToken: (opts?: { prompt?: string }) => void;
+}
+
+declare global {
+  interface Window {
+    google?: {
+      accounts?: {
+        oauth2?: {
+          initTokenClient: (config: {
+            client_id: string;
+            scope: string;
+            callback: (resp: { access_token?: string; error?: string }) => void;
+          }) => GsiTokenClient;
+        };
+      };
+    };
+  }
+}
 
 interface AuthContextType {
   user: User | null;
@@ -58,6 +86,101 @@ function clearPersistedToken() {
   }
 }
 
+// Load the Google Identity Services script (used only for silent token
+// renewal). Resolves false on load failure/timeout so boot never hangs.
+function loadGsiScript(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined') {
+      resolve(false);
+      return;
+    }
+    if (window.google?.accounts?.oauth2) {
+      resolve(true);
+      return;
+    }
+    const existing = document.getElementById('gsi-client-script') as HTMLScriptElement | null;
+    if (existing) {
+      if (existing.dataset.loaded === '1') {
+        resolve(true);
+        return;
+      }
+      existing.addEventListener('load', () => resolve(true));
+      existing.addEventListener('error', () => resolve(false));
+      return;
+    }
+    const s = document.createElement('script');
+    s.id = 'gsi-client-script';
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true;
+    s.onload = () => {
+      s.dataset.loaded = '1';
+      resolve(true);
+    };
+    s.onerror = () => resolve(false);
+    setTimeout(() => resolve(false), 8000);
+    document.head.appendChild(s);
+  });
+}
+
+// Silently renew the Google OAuth access token via GIS (`prompt: ''` never
+// shows UI). Returns a fresh token or null if the user's Google session /
+// prior consent can't produce one silently.
+async function silentlyRenewGoogleToken(): Promise<string | null> {
+  const loaded = await loadGsiScript();
+  if (!loaded) return null;
+  const oauth2 = window.google?.accounts?.oauth2;
+  if (!oauth2) return null;
+  const clientIds = Array.from(new Set([oAuthClientId].filter(Boolean)));
+  for (const clientId of clientIds) {
+    const token = await new Promise<string | null>((resolve) => {
+      let settled = false;
+      const finish = (value: string | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      try {
+        const tokenClient = oauth2.initTokenClient({
+          client_id: clientId,
+          scope: GOOGLE_SCOPES.join(' '),
+          // Errors (e.g. no consent) arrive via the callback with resp.error;
+          // an unregistered origin would make Google render its own popup, so
+          // only clients whose origin is registered should ever be tried.
+          callback: (resp) => {
+            if (resp?.error) {
+              finish(null);
+              return;
+            }
+            finish(resp?.access_token || null);
+          },
+        });
+        tokenClient.requestAccessToken({ prompt: '' });
+        // Safety net: if the callback never fires, don't block the boot.
+        setTimeout(() => finish(null), 10000);
+      } catch {
+        finish(null);
+      }
+    });
+    if (token) return token;
+  }
+  return null;
+}
+
+// Restore the per-user Google access token from the RTDB backup
+// (google_tokens/{uid}, written by persistAccessToken on every grant).
+async function restoreTokenFromRtdb(uid: string): Promise<string | null> {
+  try {
+    const snap = await get(ref(db, `google_tokens/${uid}`));
+    const val = snap.val();
+    if (val && typeof val.accessToken === 'string' && val.accessToken) {
+      return val.accessToken;
+    }
+  } catch (err) {
+    console.warn('Token restore from RTDB failed:', err);
+  }
+  return null;
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -68,12 +191,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isNewUser, setIsNewUser] = useState<boolean>(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       if (!currentUser) {
         setAccessToken(null);
         clearPersistedToken();
         setExplicitlyAuthenticated(false);
+        return;
+      }
+      // Auto-login returning users: a silently restored Firebase session
+      // passes the gate instead of forcing the AuthPage again. The Google
+      // access token is restored (localStorage → RTDB backup) and silently
+      // renewed via GIS so workspace tools keep working on return visits.
+      setExplicitlyAuthenticated(true);
+      let token = loadPersistedToken();
+      if (!token) {
+        token = await restoreTokenFromRtdb(currentUser.uid);
+        if (token) {
+          setAccessToken(token);
+          try {
+            localStorage.setItem(TOKEN_STORAGE_KEY, token);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      const renewed = await silentlyRenewGoogleToken();
+      if (renewed) {
+        void persistAccessToken(renewed).catch(() => {
+          // renewal already saved to localStorage; RTDB backup failure is non-fatal
+        });
       }
     });
 
@@ -92,7 +239,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setIsNewUser(!!isFresh);
         }
       })
-      .catch((err) => console.error('Redirect sign-in result error:', err))
+      .catch((err) => console.error('Redirect sign-in result error:', err));
+
+    // Only reveal the app once Firebase has restored any persisted session
+    // (or confirmed there is none). Without this, `loading` could flip false
+    // before onAuthStateChanged fires and the login page would flash while
+    // the session is being restored on refresh/restart.
+    auth
+      .authStateReady()
+      .catch((err) => console.error('authStateReady error:', err))
       .finally(() => setLoading(false));
 
     return () => unsubscribe();

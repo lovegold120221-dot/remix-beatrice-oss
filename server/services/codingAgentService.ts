@@ -23,6 +23,26 @@ interface AgentSession {
   endTime?: number;
 }
 
+// Unified activity metadata for coding-agent events: every stream/update
+// carries an explicit type/status/stage so the client can render an activity
+// card without guessing task state.
+const STATUS_TO_STAGE: Record<string, string> = {
+  starting: 'Initializing agent',
+  running: 'Working on the task',
+  completed: 'Completed',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+function taskMeta(status: string, message?: string) {
+  return {
+    type: 'code',
+    status,
+    stage: STATUS_TO_STAGE[status] || status,
+    message,
+  };
+}
+
 const sessions = new Map<string, AgentSession>();
 const clients = new Set<WebSocket>();
 
@@ -33,7 +53,7 @@ function broadcast(msg: unknown) {
   }
 }
 
-function sendChunk(sessionId: string, chunk: string, done: boolean, error?: string) {
+function sendChunk(sessionId: string, chunk: string, done: boolean, error?: string, status?: string) {
   broadcast({
     type: 'codingAgentStream',
     sessionId,
@@ -41,6 +61,7 @@ function sendChunk(sessionId: string, chunk: string, done: boolean, error?: stri
     done,
     error,
     timestamp: Date.now(),
+    ...taskMeta(status || (done ? (error ? 'failed' : 'completed') : 'running'), error),
   });
 }
 
@@ -49,7 +70,24 @@ function appendLog(session: AgentSession, line: string) {
   const entry = `[${timestamp}] ${line}`;
   session.log.push(entry);
   session.output += line + '\n';
-  sendChunk(session.id, line + '\n', false);
+  sendChunk(session.id, line + '\n', false, undefined, session.status);
+}
+
+function broadcastCodingAgentUpdate(session: AgentSession) {
+  broadcast({
+    type: 'codingAgentUpdate',
+    session: {
+      id: session.id,
+      task: session.task,
+      cwd: session.cwd,
+      status: session.status,
+      log: session.log,
+      output: session.output,
+      error: session.error,
+      timestamp: Date.now(),
+      ...taskMeta(session.status, session.error),
+    },
+  });
 }
 
 async function startCodingAgent(sessionId: string, task: string, cwd?: string) {
@@ -82,6 +120,7 @@ async function startCodingAgent(sessionId: string, task: string, cwd?: string) {
     startTime: Date.now(),
   };
   sessions.set(sessionId, session);
+  broadcastCodingAgentUpdate(session);
 
   appendLog(session, `▶ Coding Agent starting in ${workDir}`);
   appendLog(session, `▶ Task: ${task}`);
@@ -124,7 +163,8 @@ async function startCodingAgent(sessionId: string, task: string, cwd?: string) {
         appendLog(session, `❌ Coding Agent failed (exit ${code})`);
       }
       session.process = undefined;
-      sendChunk(sessionId, '', true, session.error);
+      broadcastCodingAgentUpdate(session);
+      sendChunk(sessionId, '', true, session.error, session.status);
       persistSession(session);
     });
 
@@ -134,7 +174,8 @@ async function startCodingAgent(sessionId: string, task: string, cwd?: string) {
       session.endTime = Date.now();
       session.process = undefined;
       appendLog(session, `❌ Process error: ${err.message}`);
-      sendChunk(sessionId, '', true, session.error);
+      broadcastCodingAgentUpdate(session);
+      sendChunk(sessionId, '', true, session.error, session.status);
       persistSession(session);
     });
 
@@ -158,20 +199,8 @@ function cancelCodingAgent(sessionId: string) {
 session.status = 'cancelled';
   session.endTime = Date.now();
   appendLog(session, '⏹ Coding Agent cancelled by user');
-  broadcast({
-    type: 'codingAgentUpdate',
-    session: {
-      id: session.id,
-      task: session.task,
-      cwd: session.cwd,
-      status: session.status,
-      log: session.log,
-      output: session.output,
-      error: session.error,
-      timestamp: Date.now(),
-    },
-  });
-  sendChunk(session.id, '', true);
+  broadcastCodingAgentUpdate(session);
+  sendChunk(session.id, '', true, undefined, 'cancelled');
   persistSession(session);
   return true;
 }

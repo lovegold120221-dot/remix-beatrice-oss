@@ -2861,7 +2861,11 @@ function handleShutdown(signal: string) {
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('SIGINT', () => handleShutdown('SIGINT'));
 
-// auto-init on import (resumes existing session; does not block server boot)
-initWhatsAppSession().catch((err: any) => {
-  console.error('[WhatsApp] Auto-init failed:', err.message);
-});
+// auto-init on import (resumes existing session; does not block server boot).
+// Tests set WHATSAPP_AUTO_INIT=0 so importing the module (via toolRegistry)
+// doesn't start Baileys/RTDB connections and leave reconnect timers running.
+if (process.env.WHATSAPP_AUTO_INIT !== '0') {
+  initWhatsAppSession().catch((err: any) => {
+    console.error('[WhatsApp] Auto-init failed:', err.message);
+  });
+}

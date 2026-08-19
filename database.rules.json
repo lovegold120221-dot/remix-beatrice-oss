@@ -65,6 +65,10 @@
     "whatsapp_store": {
       ".read": false,
       ".write": false
+    },
+    "tasks": {
+      ".read": false,
+      ".write": false
     }
   }
 }

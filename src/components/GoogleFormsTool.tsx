@@ -8,9 +8,7 @@ import {
   List,
   RefreshCw,
   ExternalLink,
-  HelpCircle,
   Sparkles,
-  CheckSquare,
   AlertCircle
 } from 'lucide-react';
 
@@ -27,6 +25,7 @@ export interface GoogleFormItem {
   title: string;
   description?: string;
   webViewLink?: string;
+  responderUri?: string;
   questions?: FormQuestion[];
   responsesCount?: number;
   createdAt: string;
@@ -37,7 +36,7 @@ interface GoogleFormsToolProps {
 }
 
 export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated }) => {
-  const { accessToken, signInWithGoogle, user } = useAuth();
+  const { accessToken, signInWithGoogle } = useAuth();
   const [activeSubTab, setActiveSubTab] = useState<'create' | 'list' | 'respond'>('create');
 
   // Form Creation State
@@ -61,40 +60,14 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
   const [isCreating, setIsCreating] = useState(false);
   const [createdForm, setCreatedForm] = useState<GoogleFormItem | null>(null);
 
-  // Forms List State
-  const [formsList, setFormsList] = useState<GoogleFormItem[]>([
-    {
-      id: 'form_doc_1',
-      title: 'Eburon AI Customer Feedback Form',
-      description: 'Collect user feedback on voice latency and tool accuracy.',
-      webViewLink: 'https://docs.google.com/forms/d/form_doc_1/edit',
-      createdAt: new Date().toISOString(),
-      responsesCount: 14,
-      questions: [
-        { id: 'q1', title: 'Overall Experience Rating', type: 'multiple_choice', options: ['5 Stars', '4 Stars', '3 Stars', '1-2 Stars'] },
-        { id: 'q2', title: 'Additional Comments', type: 'text' }
-      ]
-    },
-    {
-      id: 'form_doc_2',
-      title: 'Meeting App Beta Signup',
-      description: 'Register early access for Beatrice Real-Time Meeting Summarizer.',
-      webViewLink: 'https://docs.google.com/forms/d/form_doc_2/edit',
-      createdAt: new Date(Date.now() - 86400000).toISOString(),
-      responsesCount: 42,
-      questions: [
-        { id: 'q1', title: 'Work Email Address', type: 'text', required: true },
-        { id: 'q2', title: 'Primary Google Workspace Product', type: 'multiple_choice', options: ['Gmail', 'Docs & Sheets', 'Meet & Calendar', 'All of the above'] }
-      ]
-    }
-  ]);
+  // Forms List State — starts empty; real forms are loaded from the server
+  // endpoint (/api/workspace/forms/list → real Drive/Forms API). No mock rows.
+  const [formsList, setFormsList] = useState<GoogleFormItem[]>([]);
+  const [formListError, setFormListError] = useState<string | null>(null);
   const [isLoadingList, setIsLoadingList] = useState(false);
 
   // Respond State
-  const [selectedForm, setSelectedForm] = useState<GoogleFormItem | null>(formsList[0]);
-  const [formAnswers, setFormAnswers] = useState<Record<string, string>>({});
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [selectedForm, setSelectedForm] = useState<GoogleFormItem | null>(null);
 
   const handleAddQuestion = () => {
     const newQ: FormQuestion = {
@@ -135,9 +108,10 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
   const handleCreateForm = async () => {
     if (!title.trim()) return;
     setIsCreating(true);
+    setFormListError(null);
 
     try {
-      // Send creation request to server endpoint or mock API
+      // Send creation request to the server endpoint (real Forms API).
       const response = await fetch('/api/workspace/forms/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -145,46 +119,23 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
           title,
           description,
           questions,
-          accessToken
         })
       });
 
-      let formResult: GoogleFormItem;
-      if (response.ok) {
-        const data = await response.json();
-        formResult = data.form;
-      } else {
-        // Fallback robust local state creation
-        const formId = 'form_' + Math.random().toString(36).substring(2, 9);
-        formResult = {
-          id: formId,
-          title,
-          description,
-          webViewLink: `https://docs.google.com/forms/d/${formId}/edit`,
-          questions,
-          responsesCount: 0,
-          createdAt: new Date().toISOString(),
-        };
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.form) {
+        // Surface the real error instead of fabricating a fake form.
+        setFormListError(data?.error || `Could not create form (HTTP ${response.status})`);
+        return;
       }
 
+      const formResult: GoogleFormItem = data.form;
       setCreatedForm(formResult);
       setFormsList([formResult, ...formsList]);
       if (onFormCreated) onFormCreated(formResult);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error creating Google Form:', err);
-      // Fallback
-      const formId = 'form_' + Math.random().toString(36).substring(2, 9);
-      const formResult: GoogleFormItem = {
-        id: formId,
-        title,
-        description,
-        webViewLink: `https://docs.google.com/forms/d/${formId}/edit`,
-        questions,
-        responsesCount: 0,
-        createdAt: new Date().toISOString(),
-      };
-      setCreatedForm(formResult);
-      setFormsList([formResult, ...formsList]);
+      setFormListError(err?.message || 'Could not create the form — Google Forms is unavailable.');
     } finally {
       setIsCreating(false);
     }
@@ -192,16 +143,24 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
 
   const handleFetchForms = async () => {
     setIsLoadingList(true);
+    setFormListError(null);
     try {
       const res = await fetch('/api/workspace/forms/list');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.forms) {
-          setFormsList(data.forms);
-        }
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.error) {
+        setFormListError(data?.error || `Could not load forms (HTTP ${res.status})`);
+        return;
       }
-    } catch (e) {
+      if (data.forms) {
+        setFormsList(data.forms);
+        setSelectedForm((prev) => {
+          if (prev && data.forms.some((f: GoogleFormItem) => f.id === prev.id)) return prev;
+          return data.forms[0] || null;
+        });
+      }
+    } catch (e: any) {
       console.error('Error fetching forms:', e);
+      setFormListError(e?.message || 'Could not load forms — Google Drive/Forms is unavailable.');
     } finally {
       setIsLoadingList(false);
     }
@@ -209,20 +168,16 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
 
   const handleSubmitResponse = async () => {
     if (!selectedForm) return;
-    setIsSubmitting(true);
-    setSubmitSuccess(false);
-
-    try {
-      await new Promise(r => setTimeout(r, 800));
-      // Update local count
-      setFormsList(formsList.map(f => f.id === selectedForm.id ? { ...f, responsesCount: (f.responsesCount || 0) + 1 } : f));
-      setSubmitSuccess(true);
-      setFormAnswers({});
-    } catch (e) {
-      console.error('Submit error:', e);
-    } finally {
-      setIsSubmitting(false);
+    // There is no public REST API to programmatically submit a Google Form
+    // response — the real submission happens on the form's public page. Open
+    // the live responder link instead of faking a submission.
+    if (selectedForm.responderUri) {
+      window.open(selectedForm.responderUri, '_blank', 'noopener,noreferrer');
+      return;
     }
+    setFormListError(
+      'This form has no public response link available. Open the form from the Library and use the Edit view to share it.'
+    );
   };
 
   return (
@@ -236,7 +191,7 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
           <div>
             <div className="font-semibold text-[#4facfe]">Google Forms API Active</div>
             <div className="text-[11px] text-[#4facfe]/70">
-              {accessToken ? 'Authenticated with Forms & Drive Scopes' : 'Anonymous / Local Fallback Active'}
+              {accessToken ? 'Authenticated with Forms & Drive Scopes' : 'Not connected — connect Google to create and manage real forms'}
             </div>
           </div>
         </div>
@@ -496,64 +451,26 @@ export const GoogleFormsTool: React.FC<GoogleFormsToolProps> = ({ onFormCreated 
                 )}
               </div>
 
-              {submitSuccess ? (
-                <div className="p-4 rounded-xl bg-emerald-950/40 border border-[#00f2fe]/30 text-emerald-300 flex items-center gap-2 font-medium">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                  Response submitted successfully to Google Forms!
-                </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                Responses are collected on the live Google Form. Open the public
+                response link to fill it in — Beatrice never fakes submissions.
+              </p>
+
+              {selectedForm.responderUri ? (
+                <button
+                  onClick={handleSubmitResponse}
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 text-white font-semibold transition-all flex items-center justify-center gap-2"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Open response form
+                </button>
               ) : (
-                <div className="space-y-3 pt-2">
-                  {(selectedForm.questions || []).map((q, idx) => (
-                    <div key={q.id} className="p-3 rounded-xl bg-black/40 border border-white/5 space-y-2">
-                      <div className="font-semibold text-zinc-200">
-                        {idx + 1}. {q.title} {q.required && <span className="text-rose-400">*</span>}
-                      </div>
-
-                      {q.type === 'text' ? (
-                        <input
-                          type="text"
-                          value={formAnswers[q.id] || ''}
-                          onChange={(e) => setFormAnswers({ ...formAnswers, [q.id]: e.target.value })}
-                          className="w-full px-3 py-1.5 rounded-lg bg-[#121215] border border-white/10 text-zinc-200 focus:outline-none"
-                          placeholder="Your answer..."
-                        />
-                      ) : (
-                        <div className="space-y-1.5 pt-1">
-                          {(q.options || []).map((opt) => (
-                            <label
-                              key={opt}
-                              className="flex items-center gap-2 p-2 rounded-lg bg-[#121215]/60 hover:bg-white/10/50 cursor-pointer text-zinc-300"
-                            >
-                              <input
-                                type="radio"
-                                name={q.id}
-                                value={opt}
-                                checked={formAnswers[q.id] === opt}
-                                onChange={() => setFormAnswers({ ...formAnswers, [q.id]: opt })}
-                                className="accent-[#4facfe]"
-                              />
-                              <span>{opt}</span>
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-
-                  <button
-                    onClick={handleSubmitResponse}
-                    disabled={isSubmitting}
-                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#00f2fe] to-[#4facfe] hover:opacity-90 disabled:opacity-50 text-white font-semibold transition-all flex items-center justify-center gap-2"
-                  >
-                    {isSubmitting ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <>
-                        <Send className="w-4 h-4" />
-                        Submit Response
-                      </>
-                    )}
-                  </button>
+                <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/20 text-amber-300 text-[11px] flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    No public response link is available for this form. Open it
+                    from the Library to share or edit.
+                  </span>
                 </div>
               )}
             </div>

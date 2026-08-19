@@ -28,6 +28,7 @@ import { TranscriptsView } from './components/TranscriptsView';
 import { ToolsWorkbench } from './components/ToolsWorkbench';
 import { SettingsModal } from './components/SettingsModal';
 import { ProfileModal } from './components/ProfileModal';
+import { useGenerationTasks } from './hooks/useGenerationTasks';
 import { ContextWindowHUD } from './components/ContextWindowHUD';
 import { MemoryInspectorModal } from './components/MemoryInspectorModal';
 import { VadControlWidget } from './components/VadControlWidget';
@@ -35,6 +36,8 @@ import { WhatsAppApprovalModal, WhatsAppApprovalState, WhatsAppPanelState } from
 import { WhatsAppOnboarding } from './components/WhatsAppOnboarding';
 import { TasksPage } from './components/TasksPage';
 import { LocalTerminal } from './components/LocalTerminal';
+import { GenerationActivityPage } from './components/generation/GenerationActivityPage';
+import { TaskHistoryPage } from './components/generation/TaskHistoryPage';
 import { detectDeviceType } from './lib/device';
 import { useAuth } from './context/AuthContext';
 import { AuthPage } from './components/AuthPage';
@@ -63,6 +66,7 @@ import {
 } from 'firebase/database';
 import {
   Settings,
+  Activity,
   Mic,
   MicOff,
   MessageSquare,
@@ -73,6 +77,7 @@ import {
   User as UserIcon,
   Brain,
   Volume2,
+  History,
 } from 'lucide-react';
 
 export default function App() {
@@ -104,6 +109,9 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isTasksOpen, setIsTasksOpen] = useState<boolean>(false);
+  const [tasksViewportTab, setTasksViewportTab] = useState<'processes' | 'viewport'>('processes');
+  const [isActivityOpen, setIsActivityOpen] = useState<boolean>(false);
+  const [isTaskHistoryOpen, setIsTaskHistoryOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState<boolean>(false);
   const [terminalInfo, setTerminalInfo] = useState<TerminalInfo | null>(null);
@@ -147,6 +155,7 @@ export default function App() {
 
   // Active Mobile Drawer: 'none' | 'chat' | 'video' | 'tools'
   const [activeDrawer, setActiveDrawer] = useState<'none' | 'chat' | 'video' | 'tools'>('none');
+  const generation = useGenerationTasks();
 
   const defaultConfig: BeatriceConfig = {
     voiceName: 'Aoede',
@@ -527,6 +536,8 @@ export default function App() {
 
     ws.onopen = async () => {
       console.log('Connected to Beatrice Live WebSocket bridge.');
+      // Mark any active tasks stale if no updates arrived during disconnect
+      generation.handleSocketReconnected();
       // Successful connection: reset backoff counter
       reconnectAttemptRef.current = 0;
       setStatus('connecting');
@@ -575,6 +586,7 @@ export default function App() {
     ws.onmessage = (event) => {
       try {
         const msg: WsServerMessage = JSON.parse(event.data);
+        generation.handleWsMessage(msg);
 
         switch (msg.type) {
           case 'status':
@@ -989,9 +1001,10 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Gate requires explicit sign-in (or guest skip). A silently restored Firebase
-  // session does NOT pass the gate: the skip button always routes to the AuthPage
-  // (create account / login) so the Google OAuth token is renewed on every entry.
+  // A silently restored Firebase session auto-logs-in (see AuthContext): the
+  // Google OAuth token is restored from RTDB/localStorage and silently renewed
+  // via Google Identity Services, so returning users skip the AuthPage. The
+  // guest skip is still available for first-time visitors.
   const gatePassed = introDone && (explicitlyAuthenticated || skipAuth);
   // WhatsApp integration step: shown for ANY signed-in user (new registration
   // or returning login) whose WhatsApp is not yet linked. Waits for the first
@@ -1046,6 +1059,14 @@ export default function App() {
       finishIntro();
     }
   }, [explicitlyAuthenticated, showIntro, finishIntro]);
+
+  // Once the gate opens, restore any unfinished server-side tasks into the
+  // generation store (tasks created by previous sessions, other tabs, or the
+  // Gemini tool loop) so the Activity feed and Task History are complete.
+  useEffect(() => {
+    if (!gatePassed) return;
+    void generation.syncFromServer();
+  }, [gatePassed]);
 
   const handleIntroLoaded = useCallback(() => {
     setShowIntroSkip(false);
@@ -1387,6 +1408,15 @@ export default function App() {
     }
   };
 
+  const handleDownload = useCallback((url: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
   const handleGetWeather = async (location: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'getWeather', location }));
@@ -1703,6 +1733,28 @@ export default function App() {
             >
               <Settings className="w-5 h-5" strokeWidth={2.5} />
             </button>
+            <button
+              onClick={() => {
+                triggerHaptic(10);
+                setIsActivityOpen(true);
+              }}
+              className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-[#00f2fe]/20 flex items-center justify-center text-[#00f2fe] transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-[#00f2fe]/25 cursor-pointer"
+              aria-label="Activity"
+              title="View Activity"
+            >
+              <Activity className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => {
+                triggerHaptic(10);
+                setIsTaskHistoryOpen(true);
+              }}
+              className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center text-white transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] active:scale-90 active:bg-white/15 cursor-pointer"
+              aria-label="Task History"
+              title="View Task History"
+            >
+              <History className="w-5 h-5" />
+            </button>
           </div>
 
           <div className="text-center flex flex-col gap-1">
@@ -1856,7 +1908,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-hidden p-3">
+            <div className="flex-1 overflow-hidden px-4 py-3">
               {activeDrawer === 'chat' && (
                 <TranscriptsView
                   transcripts={transcripts}
@@ -2023,6 +2075,39 @@ export default function App() {
           onRunCli={handleRunCli}
           onRunCliStream={handleRunCliStream}
           onCancelCodingAgent={handleCancelCodingAgent}
+          initialTab={tasksViewportTab}
+        />
+      )}
+
+      {isActivityOpen && (
+        <GenerationActivityPage
+          tasks={generation.tasks}
+          activeTasks={generation.activeTasks}
+          recentTasks={generation.recentTasks}
+          focusTaskId={generation.focusTaskId}
+          onClose={() => setIsActivityOpen(false)}
+          onOpenViewport={(task) => {
+            setIsActivityOpen(false);
+            setTasksViewportTab('viewport');
+            setIsTasksOpen(true);
+          }}
+          onDismiss={generation.dismissTask}
+          onCancel={generation.clearFinished}
+          download={handleDownload}
+        />
+      )}
+
+      {isTaskHistoryOpen && (
+        <TaskHistoryPage
+          onClose={() => setIsTaskHistoryOpen(false)}
+          onOpenViewport={(task) => {
+            setIsTaskHistoryOpen(false);
+            setTasksViewportTab('viewport');
+            setIsTasksOpen(true);
+          }}
+          onDismiss={generation.dismissTask}
+          onCancel={generation.clearFinished}
+          download={handleDownload}
         />
       )}
 

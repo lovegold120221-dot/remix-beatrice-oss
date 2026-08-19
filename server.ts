@@ -11,12 +11,25 @@ import { createServer as createViteServer } from 'vite';
 import { logger } from './server/logger.js';
 import {
   registerStandardMetrics,
+  registerSkillMetrics,
   renderMetrics,
   incCounter,
   observeHistogram,
 } from './server/metrics.js';
 import { requireAuth, verifyIdToken, authEnabled } from './server/auth.js';
 import { registerAllTools, dispatchTool } from './server/toolRegistry.js';
+import { handleFunctionCallWithSkills } from './server/toolRoutingMiddleware.js';
+import { createConversationContext, updateContextFromToolCall, updateContextFromSkillSelection } from './server/conversationContext.js';
+import type { ActiveContext } from './server/skills/types.js';
+import {
+  createTask,
+  deleteTask,
+  getTask,
+  initTaskStore,
+  listTasks,
+  upsertTaskFromBroadcast,
+  updateTask,
+} from './server/taskStore.js';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   handleDeployAgentTask,
@@ -1071,6 +1084,10 @@ async function startServer() {
   // Register tool dispatch + standard metrics once at boot.
   registerAllTools();
   registerStandardMetrics();
+  registerSkillMetrics();
+  initTaskStore().catch((err: any) =>
+    console.error('[TaskStore] init failed (in-memory only):', err?.message || err)
+  );
 
   // Start internal tool services on separate ports
   startSandboxService();
@@ -1181,6 +1198,94 @@ async function startServer() {
     return requireAuth(req, res, next);
   });
 
+  // ── Generation task history ──────────────────────────────────────────────
+  // Tasks are keyed by the VERIFIED session uid (res.locals.authUser) — a
+  // client can never read or write another user's tasks.
+  const taskUid = (res: any): string | null => res.locals?.authUser?.uid || null;
+
+  app.get('/api/tasks', async (req, res) => {
+    try {
+      const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '100'), 10) || 100));
+      const tasks = await listTasks(taskUid(res), limit);
+      res.json({ ok: true, tasks });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to list tasks' });
+    }
+  });
+
+  app.post('/api/tasks', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const task = await createTask(taskUid(res), {
+        id: typeof body.id === 'string' ? body.id : undefined,
+        type: body.type,
+        provider: body.provider,
+        model: body.model,
+        prompt: body.prompt,
+        status: body.status,
+        stage: body.stage,
+        progress: body.progress,
+        output: body.output,
+        previewUrl: body.previewUrl,
+        error: body.error,
+      });
+      if (!task) {
+        res.status(401).json({ ok: false, error: 'Unauthorized' });
+        return;
+      }
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to create task' });
+    }
+  });
+
+  app.get('/api/tasks/:id', async (req, res) => {
+    try {
+      const task = await getTask(taskUid(res), req.params.id);
+      if (!task) {
+        res.status(404).json({ ok: false, error: 'Task not found' });
+        return;
+      }
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to load task' });
+    }
+  });
+
+  app.patch('/api/tasks/:id', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const task = await updateTask(taskUid(res), req.params.id, {
+        type: body.type,
+        provider: body.provider,
+        model: body.model,
+        prompt: body.prompt,
+        status: body.status,
+        stage: body.stage,
+        progress: body.progress,
+        output: body.output,
+        previewUrl: body.previewUrl,
+        error: body.error,
+      });
+      if (!task) {
+        res.status(404).json({ ok: false, error: 'Task not found' });
+        return;
+      }
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to update task' });
+    }
+  });
+
+  app.delete('/api/tasks/:id', async (req, res) => {
+    try {
+      await deleteTask(taskUid(res), req.params.id);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to delete task' });
+    }
+  });
+
   app.post('/api/tools/execute-code', async (req, res) => {
     try {
       const { code, language, description } = req.body;
@@ -1219,10 +1324,30 @@ async function startServer() {
     }
   });
 
+  app.post('/api/workspace/meet/create', async (req, res) => {
+    try {
+      const { summary, description, attendees } = req.body || {};
+      const result: any = await handleCreateGoogleMeet(
+        { summary, description, attendees },
+        { broadcast: () => {}, uid: res.locals?.authUser?.uid }
+      );
+      if (result?.error) {
+        res.status(400).json({ success: false, error: result.error });
+        return;
+      }
+      res.json({ success: true, meetingUri: result.meetingUri, meeting: result });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   app.get('/api/workspace/gmail/messages', async (req, res) => {
     try {
       const query = (req.query.q as string) || 'in:inbox';
-      const result = await handleListGmailMessages({ query }, { broadcast: () => {} });
+      const result = await handleListGmailMessages(
+        { query },
+        { broadcast: () => {}, uid: res.locals?.authUser?.uid }
+      );
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1232,7 +1357,14 @@ async function startServer() {
   app.get('/api/workspace/contacts', async (req, res) => {
     try {
       const query = (req.query.q as string) || '';
-      const result = await handleListGoogleContacts({ query }, { broadcast: () => {} });
+      const result: any = await handleListGoogleContacts(
+        { query },
+        { broadcast: () => {}, uid: res.locals?.authUser?.uid }
+      );
+      if (result?.error) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1242,7 +1374,10 @@ async function startServer() {
   app.post('/api/workspace/gmail/send', async (req, res) => {
     try {
       const { to, subject, body } = req.body;
-      const result = await handleSendGmailMessage({ to, subject, body }, { broadcast: () => {} });
+      const result = await handleSendGmailMessage(
+        { to, subject, body },
+        { broadcast: () => {}, uid: res.locals?.authUser?.uid }
+      );
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1252,20 +1387,24 @@ async function startServer() {
   app.post('/api/workspace/forms/create', async (req, res) => {
     try {
       const { title, description, questions } = req.body;
-      const result = await handleCreateGoogleForm(
+      const r: any = await handleCreateGoogleForm(
         { title, description, questions },
-        { broadcast: () => {} }
+        { broadcast: () => {}, uid: res.locals?.authUser?.uid }
       );
+      if (r?.error) {
+        res.status(400).json({ success: false, error: r.error });
+        return;
+      }
       res.json({
         success: true,
         form: {
-          id: result.formId,
-          title: result.title,
-          description: result.description,
-          webViewLink: result.webViewLink,
-          questions: result.questions,
+          id: r.formId,
+          title: r.title,
+          description: r.description,
+          webViewLink: r.webViewLink,
+          questions: r.questions,
           responsesCount: 0,
-          createdAt: result.timestamp,
+          createdAt: r.timestamp,
         }
       });
     } catch (err: any) {
@@ -1276,7 +1415,10 @@ async function startServer() {
   app.get('/api/workspace/forms/list', async (req, res) => {
     try {
       const query = (req.query.q as string) || '';
-      const result = await handleListGoogleForms({ query }, { broadcast: () => {} });
+      const result = await handleListGoogleForms(
+        { query },
+        { broadcast: () => {}, uid: res.locals?.authUser?.uid }
+      );
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1558,10 +1700,21 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
     // Never give up on the Live session: retry forever with capped backoff so
     // the voice link self-heals instead of stopping and asking for a manual tap.
     let intentionalLiveClose = false;
+    // Skill routing: per-connection conversation context
+    let conversationContext: ActiveContext = createConversationContext();
 
     const broadcastToClient = (msg: unknown) => {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify(msg));
+      }
+      // Persist every generation broadcast as a per-user task (uid comes from
+      // the verified session, never the client). Runs even when the socket is
+      // closed so background generations survive refresh/navigation/restart.
+      const uid = sessionBootstrap?.uid || null;
+      if (uid) {
+        void upsertTaskFromBroadcast(uid, msg).catch(() => {
+          // persistence is best-effort; never let it break the live loop
+        });
       }
     };
 
@@ -1654,11 +1807,30 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
             }
 
             // 5. Tool Calls / Function Calls
+            // ONE FUNCTION AT A TIME: if the model emits multiple function
+            // calls in a single turn, only the first is executed. The rest are
+            // answered with a "wait" response instead of running — the model
+            // must proceed one confirmed call per turn.
             if (message.toolCall?.functionCalls) {
-              for (const call of message.toolCall.functionCalls) {
+              for (let i = 0; i < message.toolCall.functionCalls.length; i++) {
+                const call = message.toolCall.functionCalls[i];
                 const callId = call.id;
                 const name = call.name;
                 const args = (call.args || {}) as Record<string, unknown>;
+
+                if (i > 0) {
+                  const skipped = { output: 'Skipped — one function at a time. Do not run multiple calls; ask the user to confirm and call only one function per turn.' };
+                  broadcastToClient({ type: 'toolCall', id: callId, name, args });
+                  broadcastToClient({ type: 'toolResult', id: callId, name, result: skipped });
+                  try {
+                    await liveSession.sendToolResponse({
+                      functionResponses: [{ name, response: skipped, id: callId }],
+                    });
+                  } catch (sendErr: any) {
+                    console.error('Error sending skipped tool response:', sendErr);
+                  }
+                  continue;
+                }
 
                 broadcastToClient({
                   type: 'toolCall',
@@ -1672,6 +1844,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                   ai,
                   broadcast: broadcastToClient,
                   deviceType: sessionBootstrap?.deviceType || 'desktop',
+                  uid: sessionBootstrap?.uid || undefined,
                 };
 
                 try {
@@ -1685,7 +1858,28 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
                     const waEmail = sessionBootstrap?.email || null;
                     if (waUid) await setWhatsAppUser(waUid, waEmail);
                   }
-                  toolResult = await dispatchTool(name, args, toolCtx);
+
+                  // Route through skill system: Gemini function calls become
+                  // proposals; the skill router validates, selects a skill
+                  // route, and executes through the predefined flow.
+                  const skillResponse = await handleFunctionCallWithSkills(
+                    name,
+                    args,
+                    conversationContext.activeSkill,
+                    conversationContext,
+                    toolCtx,
+                    broadcastToClient,
+                  );
+
+                  // Update conversation context with this tool call
+                  conversationContext = updateContextFromToolCall(
+                    conversationContext,
+                    name,
+                    args,
+                    skillResponse,
+                  );
+
+                  toolResult = skillResponse;
                 } catch (err: any) {
                   toolResult = { error: err.message || 'Tool execution failed' };
                 }
@@ -1949,6 +2143,112 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
             },
           });
           await sendToService('codingAgent', { type: 'runCodingAgent', sessionId, task: msg.task, cwd: msg.cwd }, broadcastToClient);
+        } else if (msg.type === 'generateVideo') {
+          // Manual video generation from the Tools workbench. The handler
+          // broadcasts progress in the background; if it fails before any
+          // broadcast (missing API key / generation lock busy), surface a
+          // failed task so the UI never goes blank or silently does nothing.
+          const callId = 'manual_video_' + Date.now();
+          broadcastToClient({ type: 'toolCall', id: callId, name: 'generateVideo', args: { prompt: msg.prompt } });
+          const res: any = await handleGenerateVideo(
+            { prompt: msg.prompt, size: msg.resolution || msg.size, duration: msg.duration },
+            { ai, broadcast: broadcastToClient }
+          );
+          if (res?.error && !res?.taskId) {
+            broadcastToClient({
+              type: 'videoGenerationUpdate',
+              task: {
+                id: `vid_${Date.now()}`,
+                model: 'happyhorse-1.1-t2v',
+                prompt: msg.prompt,
+                status: 'failed',
+                progress: 0,
+                error: String(res.error),
+                timestamp: Date.now(),
+              },
+            });
+          }
+          broadcastToClient({ type: 'toolResult', id: callId, name: 'generateVideo', result: res });
+        } else if (msg.type === 'qwenChat') {
+          const callId = 'manual_qwen_chat_' + Date.now();
+          broadcastToClient({ type: 'toolCall', id: callId, name: 'qwenChat', args: { prompt: msg.prompt } });
+          const res: any = await handleQwenChat(
+            { prompt: msg.prompt, model: msg.model, system: msg.system },
+            { ai, broadcast: broadcastToClient }
+          );
+          broadcastToClient({ type: 'toolResult', id: callId, name: 'qwenChat', result: res });
+        } else if (msg.type === 'qwenImageGenerate' || msg.type === 'qwenImageEdit') {
+          const callId = 'manual_qwen_img_' + Date.now();
+          broadcastToClient({ type: 'toolCall', id: callId, name: msg.type, args: { prompt: msg.prompt, instruction: msg.instruction } });
+          const res: any =
+            msg.type === 'qwenImageEdit'
+              ? await handleQwenImageEdit(
+                  { instruction: msg.instruction, images: msg.images, size: msg.size, watermark: msg.watermark },
+                  { ai, broadcast: broadcastToClient }
+                )
+              : await handleQwenImageGenerate(
+                  { prompt: msg.prompt, size: msg.size, watermark: msg.watermark },
+                  { ai, broadcast: broadcastToClient }
+                );
+          if (res?.error) {
+            broadcastToClient({
+              type: 'qwencloudUpdate',
+              task: {
+                id: `qwen_img_${Date.now()}`,
+                kind: msg.type === 'qwenImageEdit' ? 'imageEdit' : 'image',
+                prompt: msg.prompt || msg.instruction,
+                status: 'failed',
+                progress: 0,
+                error: String(res.error),
+                timestamp: Date.now(),
+              },
+            });
+          }
+          broadcastToClient({ type: 'toolResult', id: callId, name: msg.type, result: res });
+        } else if (msg.type === 'qwenVideoGenerate') {
+          const callId = 'manual_qwen_vid_' + Date.now();
+          broadcastToClient({ type: 'toolCall', id: callId, name: 'qwenVideoGenerate', args: { prompt: msg.prompt } });
+          const res: any = await handleQwenVideoGenerate(
+            { prompt: msg.prompt, resolution: msg.resolution, ratio: msg.ratio, duration: msg.duration },
+            { ai, broadcast: broadcastToClient }
+          );
+          if (res?.error && !res?.taskId) {
+            broadcastToClient({
+              type: 'qwencloudUpdate',
+              task: {
+                id: `qwen_vid_${Date.now()}`,
+                kind: 'video',
+                prompt: msg.prompt,
+                status: 'failed',
+                progress: 0,
+                error: String(res.error),
+                timestamp: Date.now(),
+              },
+            });
+          }
+          broadcastToClient({ type: 'toolResult', id: callId, name: 'qwenVideoGenerate', result: res });
+        } else if (msg.type === 'qwenTts') {
+          const callId = 'manual_qwen_tts_' + Date.now();
+          broadcastToClient({ type: 'toolCall', id: callId, name: 'qwenTts', args: { text: msg.text } });
+          const res: any = await handleQwenTts(
+            { text: msg.text, voice: msg.voice },
+            { ai, broadcast: broadcastToClient }
+          );
+          if (res?.error) {
+            broadcastToClient({
+              type: 'qwencloudUpdate',
+              task: {
+                id: `qwen_tts_${Date.now()}`,
+                kind: 'tts',
+                prompt: msg.text,
+                status: 'failed',
+                progress: 0,
+                error: String(res.error),
+                timestamp: Date.now(),
+              },
+            });
+          }
+          broadcastToClient({ type: 'toolResult', id: callId, name: 'qwenTts', result: res });
         } else if (msg.type === 'cancelCodingAgent') {
           await sendToService('codingAgent', { type: 'cancelCodingAgent', sessionId: msg.sessionId }, broadcastToClient);
         }

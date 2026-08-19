@@ -21,7 +21,7 @@ export interface GoogleContact {
 export async function listGoogleContacts(
   accessToken?: string,
   query: string = ''
-): Promise<{ contacts: GoogleContact[]; totalCount: number }> {
+): Promise<{ contacts: GoogleContact[]; totalCount: number; error?: string }> {
   try {
     if (accessToken) {
       // Direct call to Google People API connections endpoint
@@ -96,6 +96,10 @@ export async function listGoogleContacts(
           contacts: data.contacts,
           totalCount: data.count || data.contacts.length,
         };
+      }
+      if (data.error) {
+        console.warn('Backend contacts error:', data.error);
+        return { contacts: [], totalCount: 0, error: data.error };
       }
     }
   } catch (err) {

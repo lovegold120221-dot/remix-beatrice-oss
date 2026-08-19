@@ -20,22 +20,28 @@ googleProvider.setCustomParameters({
 
 // OAuth client ID from Google Cloud (for reference / future use)
 export const oAuthClientId = (firebaseConfig as any).oAuthClientId || '112636717363-jc7shven29f6v0014h5f11mjt9bhl0hp.apps.googleusercontent.com';
-googleProvider.addScope('https://www.googleapis.com/auth/drive');
-googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
-googleProvider.addScope('https://www.googleapis.com/auth/drive.readonly');
-googleProvider.addScope('https://www.googleapis.com/auth/forms.body');
-googleProvider.addScope('https://www.googleapis.com/auth/forms.body.readonly');
-googleProvider.addScope('https://www.googleapis.com/auth/forms.responses.readonly');
-googleProvider.addScope('https://mail.google.com/');
-googleProvider.addScope('https://www.googleapis.com/auth/gmail.readonly');
-googleProvider.addScope('https://www.googleapis.com/auth/gmail.send');
-googleProvider.addScope('https://www.googleapis.com/auth/gmail.compose');
-googleProvider.addScope('https://www.googleapis.com/auth/gmail.modify');
-googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
-googleProvider.addScope('https://www.googleapis.com/auth/calendar');
-googleProvider.addScope('https://www.googleapis.com/auth/tasks');
-googleProvider.addScope('https://www.googleapis.com/auth/contacts');
-googleProvider.addScope('https://www.googleapis.com/auth/documents');
+// Scopes the workspace tools need (Gmail/Drive/Calendar/Forms/...). Shared
+// with the GIS silent token renewal in AuthContext so both paths request the
+// exact same consent.
+export const GOOGLE_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/forms.body',
+  'https://www.googleapis.com/auth/forms.body.readonly',
+  'https://www.googleapis.com/auth/forms.responses.readonly',
+  'https://mail.google.com/',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/tasks',
+  'https://www.googleapis.com/auth/contacts',
+  'https://www.googleapis.com/auth/documents',
+];
+for (const scope of GOOGLE_SCOPES) googleProvider.addScope(scope);
 
 export async function testConnection() {
   try {
@@ -91,7 +97,10 @@ export async function uploadMediaToFirebaseStorage(
   path: string = 'media'
 ): Promise<string> {
   const timestamp = Date.now().toString(36);
-  const fileName = `${path}/${timestamp}.${contentType.split('/')[1]}`;
+  // contentType may be "video/mp4" or a bare extension like "mp4" — derive a
+  // safe file extension either way (a bare "mp4" used to yield ".undefined").
+  const ext = contentType.includes('/') ? (contentType.split('/').pop() || 'bin') : contentType || 'bin';
+  const fileName = `${path}/${timestamp}.${ext}`;
   const fileRef = ref(storage, fileName);
   await uploadString(fileRef, base64Data, 'data_url' as const);
   const downloadUrl = await getDownloadURL(fileRef);

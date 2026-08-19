@@ -92,3 +92,16 @@ export function registerStandardMetrics(): void {
   registerHistogram('beatrice_tool_duration_seconds', 'Tool call duration in seconds');
   registerHistogram('beatrice_http_duration_seconds', 'HTTP request duration in seconds');
 }
+
+// ── Skill routing metrics (P2) ──────────────────────────────────────────────
+
+export function registerSkillMetrics(): void {
+  registerCounter('beatrice_skill_route_total', 'Total skill routes selected');
+  registerCounter('beatrice_skill_route_no_tool_total', 'Queries routed to NO tool (conversation)');
+  registerCounter('beatrice_skill_route_clarification_total', 'Queries that needed clarification');
+  registerCounter('beatrice_skill_route_override_total', 'Gemini tool proposals overridden by the router');
+  registerCounter('beatrice_skill_execution_total', 'Total skill executions started');
+  registerCounter('beatrice_skill_execution_failures_total', 'Skill executions that failed');
+  registerHistogram('beatrice_skill_execution_duration_seconds', 'Skill execution duration in seconds');
+  registerCounter('beatrice_tool_validation_failures_total', 'Tool calls rejected by routing validation');
+}

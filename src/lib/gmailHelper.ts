@@ -24,7 +24,7 @@ export interface SendEmailPayload {
 export async function listGmailMessages(
   accessToken?: string,
   query: string = 'in:inbox'
-): Promise<{ messages: GmailMessage[]; totalCount: number }> {
+): Promise<{ messages: GmailMessage[]; totalCount: number; error?: string }> {
   try {
     if (accessToken) {
       // Try direct Google REST API fetch
@@ -59,6 +59,9 @@ export async function listGmailMessages(
     );
     if (backendRes.ok) {
       const data = await backendRes.json();
+      if (data?.error) {
+        return { messages: [], totalCount: 0, error: data.error };
+      }
       return {
         messages: data.messages || [],
         totalCount: data.totalCount || 0,
@@ -68,44 +71,13 @@ export async function listGmailMessages(
     console.error('Error in listGmailMessages:', err);
   }
 
-  // Fallback default sample emails
+  // NO mock fallback — if both the direct API and the server endpoint are
+  // unavailable, surface the failure instead of fabricating inbox contents.
   return {
-    messages: [
-      {
-        id: 'msg_101',
-        subject: 'Eburon AI System Briefing & Quarterly Roadmap',
-        from: 'Jo Lernout <jo@eburon.ai>',
-        to: 'Beatrice User <user@eburon.ai>',
-        date: new Date(Date.now() - 3600000).toLocaleString(),
-        snippet:
-          'Beatrice OSS integration looks remarkable. Ensure Google Workspace scopes are active across all endpoints.',
-        body: `Hi Beatrice Team,\n\nOur integration with Google Workspace (Gmail, Calendar, Docs, Forms) is functioning smoothly. Please ensure the voice latency and WebSocket pipelines remain below 200ms.\n\nBest regards,\nJo Lernout`,
-        unread: true,
-      },
-      {
-        id: 'msg_102',
-        subject: 'Google Workspace API Authorization Confirmation',
-        from: 'Google Cloud Platform <no-reply@accounts.google.com>',
-        to: 'lovegold120221@gmail.com',
-        date: new Date(Date.now() - 7200000).toLocaleString(),
-        snippet:
-          'OAuth credentials for eburon-ai-beatrice are active with Gmail, Calendar, Drive & Meet scopes.',
-        body: `Security Notification:\n\nYour app "eburon-ai-beatrice" was granted full access to Gmail, Calendar, Tasks, Contacts, and Docs scopes.\n\nProject ID: eburon-ai-beatrice\nRegion: asia-southeast1`,
-        unread: false,
-      },
-      {
-        id: 'msg_103',
-        subject: 'Voice Assistant Meeting Agenda: Beatrice Real-Time Sync',
-        from: 'AI Strategy Group <events@eburon.ai>',
-        to: 'team@eburon.ai',
-        date: new Date(Date.now() - 86400000).toLocaleString(),
-        snippet:
-          'Attached is the Google Meet link and agenda for our upcoming voice agent review session.',
-        body: `Meeting Summary:\n- Voice latency analysis\n- Tool calling via Gemini Live WebSocket\n- Google Forms & Gmail automated drafting`,
-        unread: false,
-      },
-    ],
-    totalCount: 3,
+    messages: [],
+    totalCount: 0,
+    error:
+      'Gmail is not available right now — the Google connection could not be reached. Please reconnect Google from the profile menu and try again.',
   };
 }
 
@@ -235,8 +207,11 @@ export async function sendGmailMessage(
     return { success: false, error: err.message };
   }
 
+  // NO mock fallback — never report an email as sent when it wasn't. Surface
+  // the failure so the user can reconnect Google or retry.
   return {
-    success: true,
-    messageId: 'sent_' + Math.random().toString(36).substring(2, 9),
+    success: false,
+    error:
+      'Email could not be sent — the Google connection is unavailable or the send request failed. Please reconnect Google from the profile menu and try again.',
   };
 }

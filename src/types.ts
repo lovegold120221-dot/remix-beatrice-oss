@@ -68,6 +68,7 @@ export interface CodeSandboxRun {
   timestamp: number;
   stream?: string;
   done?: boolean;
+  status?: string;
   previewUrl?: string;
 }
 
@@ -80,6 +81,7 @@ export interface CliCommandRun {
   timestamp: number;
   stream?: string;
   done?: boolean;
+  status?: string;
 }
 
 export interface AgentTask {
@@ -101,7 +103,12 @@ export interface CodingAgentSession {
   log: string[];
   output: string;
   error?: string;
+  type?: string;
+  stage?: string;
+  message?: string;
   timestamp: number;
+  startTime?: number;
+  endTime?: number;
 }
 
 export interface RealtimeEvent {
@@ -123,18 +130,26 @@ export interface BrowserStreamSession {
 
 export interface VideoGenerationTask {
   id: string;
+  type?: string;
+  stage?: string;
+  message?: string;
   dashTaskId?: string;
   requestId?: string;
+  model?: string;
   prompt: string;
   status: string;
   progress: number;
   videoUrl?: string;
+  downloadUrl?: string;
   error?: string;
   timestamp: number;
 }
 
 export interface QwenCloudTask {
   id: string;
+  type?: string;
+  stage?: string;
+  message?: string;
   kind: 'chat' | 'image' | 'imageEdit' | 'video' | 'tts';
   dashTaskId?: string;
   requestId?: string;
@@ -142,6 +157,7 @@ export interface QwenCloudTask {
   status: string;
   progress: number;
   urls?: string[];
+  firebaseUrls?: string[];
   audioUrl?: string;
   result?: string;
   error?: string;
@@ -236,10 +252,11 @@ export type WsServerMessage =
   | { type: 'browserUpdate'; sessionId: string; event: string; done: boolean; [key: string]: unknown }
   | { type: 'computerUpdate'; sessionId: string; event: string; done: boolean; [key: string]: unknown }
   | { type: 'codingAgentUpdate'; session: CodingAgentSession }
-  | { type: 'codingAgentStream'; sessionId: string; chunk: string; done: boolean; error?: string }
+  | { type: 'codingAgentStream'; sessionId: string; chunk: string; done: boolean; error?: string; status?: string; stage?: string; message?: string }
   | { type: 'whatsappStatus'; status: string; connected: boolean; pairingCode?: string | null; qrDataUrl?: string | null; error?: string | null; reconnectAttempt?: number; profile?: { name: string | null; phone: string | null; avatarUrl: string | null } | null; bossMode?: boolean; uid?: string | null; email?: string | null }
   | { type: 'whatsappApprovalRequest'; id: string; recipient: string; recipientName?: string; purpose?: string }
   | { type: 'whatsappIncomingMessages'; messages: { id?: string; chatJid?: string; chatName?: string; fromMe?: boolean; sender?: string; timestamp?: number | null; type?: string; text?: string }[] }
+  | { type: 'skillExecutionUpdate'; executionId: string; skillId: string; skillName: string; domain: string; status: string; currentStep: string; currentStepTool?: string; progress: number; startedAt: number; completedAt?: number; error?: string }
   | { type: 'terminalOpen'; deviceType: DeviceType; mode: 'browser' | 'termius'; sshUrl?: string; host?: string; port?: number; user?: string; command?: string }
   | { type: 'error'; message: string };
 
