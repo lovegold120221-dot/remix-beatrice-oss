@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { GenerationTask, GenerationTaskStatus } from '../../types/generation';
+import { isTaskActive } from '../../types/generation';
 import { GenerationProgress, formatElapsed } from './GenerationProgress';
+import { MediaStageAnimation } from './MediaStageAnimation';
+
+const MEDIA_TYPES = new Set(['video', 'image', 'audio']);
 
 const STATUS_STYLES: Record<GenerationTaskStatus, { dot: string; text: string; label: string }> = {
   queued: { dot: 'bg-amber-400', text: 'text-amber-300', label: 'Queued' },
@@ -91,7 +95,7 @@ export function GenerationResultPreview({ task, download }: GenerationResultPrev
   }
 
   const text = task.message || task.logs?.slice(-3).join('\n') || undefined;
-  if (text) {
+  if (text && !MEDIA_TYPES.has(type)) {
     return (
       <div className="mt-3 animate-fade-in motion-reduce:animate-none rounded-lg bg-black/30 border border-white/10 p-2.5">
         <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-zinc-300 max-h-36 overflow-y-auto">
@@ -139,7 +143,8 @@ export function GenerationTaskCard({
   const statusMeta = STATUS_STYLES[task.status] || STATUS_STYLES.running;
   const canOpenViewport = onOpenViewport && ['sandbox', 'cli', 'browser', 'computer'].includes(task.type);
   const canCancel = onCancel && (task.type === 'code' || task.type === 'sandbox' || task.type === 'cli') && task.status !== 'cancelled';
-  const details = task.raw ? JSON.stringify(task.raw, null, 2) : undefined;
+  const isMedia = MEDIA_TYPES.has(task.type);
+  const details = isMedia ? undefined : task.raw ? JSON.stringify(task.raw, null, 2) : undefined;
 
   return (
     <article
@@ -191,14 +196,16 @@ export function GenerationTaskCard({
         </div>
       </header>
 
-      {task.model || task.provider ? (
+      {!isMedia && (task.model || task.provider) ? (
         <p className="text-[11px] text-zinc-500 truncate">
           {task.provider}
           {task.model ? ` · ${task.model}` : ''}
         </p>
       ) : null}
 
-      {task.stage || task.message ? (
+      {isMedia && isTaskActive(task.status) ? (
+        <MediaStageAnimation type={task.type} />
+      ) : task.stage || task.message ? (
         <div className="min-h-0">
           {task.stage ? (
             <p className="text-sm text-zinc-200 leading-snug">{task.stage}</p>
