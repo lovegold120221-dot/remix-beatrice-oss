@@ -39,10 +39,10 @@ const DASHSCOPE_INTL_BASE = 'https://dashscope-intl.aliyuncs.com/api/v1';
 
 // Fallback model chains. Primary first. Used when a call fails or polling reports failure.
 // Source: https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview
-// qwen-image-2.0-pro and z-image-turbo run on the international endpoint; the wan2.7-image
-// models run on Token Plan.
+// qwen-image-2.0-pro and z-image-turbo run on the international endpoint; the
+// qwen-image-3.0-pro / wan2.7-image models run on Token Plan.
 const INTEL_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo'];
-const QWEN_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'wan2.7-image-pro', 'wan2.7-image'];
+const QWEN_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'qwen-image-3.0-pro', 'wan2.7-image-pro', 'wan2.7-image'];
 // Video models rotate from most capable to fallback. wan3.0-video runs on the
 // international endpoint (async submit + task poll); the happyhorse models run on Token Plan.
 const QWEN_VIDEO_MODELS = ['wan3.0-video', 'happyhorse-1.1-t2v'];

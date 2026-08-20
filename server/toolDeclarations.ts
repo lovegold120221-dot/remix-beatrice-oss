@@ -146,7 +146,7 @@ export function getFunctionDeclarations() {
             type: Type.OBJECT,
             properties: {
               prompt: { type: Type.STRING, description: 'Image description' },
-              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / wan2.7-image-pro / wan2.7-image' },
+              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / qwen-image-3.0-pro / wan2.7-image-pro / wan2.7-image' },
               size: { type: Type.STRING, description: '1K, 2K, 4K, or width*height' },
               n: { type: Type.NUMBER, description: 'Number of images' },
               watermark: { type: Type.BOOLEAN, description: 'Add AI Generated watermark' },
@@ -165,7 +165,7 @@ export function getFunctionDeclarations() {
             properties: {
               instruction: { type: Type.STRING, description: 'What to do with the images' },
               images: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Public image URLs, base64, or file paths' },
-              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / wan2.7-image-pro / wan2.7-image' },
+              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / qwen-image-3.0-pro / wan2.7-image-pro / wan2.7-image' },
               size: { type: Type.STRING, description: '1K, 2K, or width*height' },
               n: { type: Type.NUMBER, description: 'Number of outputs' },
               watermark: { type: Type.BOOLEAN, description: 'Add watermark' },
