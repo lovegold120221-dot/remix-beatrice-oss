@@ -1,29 +1,57 @@
 # Flow — Beatrice OSS (current runtime)
 
-Mermaid diagrams traced from `server.ts`, `server/whatsapp-tools.ts`, `server/toolProxy.ts`, and `server/services/`. Complements `APP_LOGIC.md` with the memory tools and graceful-shutdown additions.
+Mermaid diagrams traced from `server.ts`, `server/whatsapp-tools.ts`, `server/toolProxy.ts`, and `server/services/`. Complements `APP_LOGIC.md` with the memory tools and graceful-shutdown additions. Auth (Firebase ID-token verification), the tool registry, and the skill-routing layer (queryRouter → skillRouter → skillExecutor → toolCatalog → toolRoutingMiddleware) are the newest layers — see AGENTS.md for their module layout.
+
+## 0. Authentication gate (all API + WS entry points)
+
+```mermaid
+flowchart TD
+    REQ[HTTP request or WS upgrade] --> APIS{path?}
+    APIS -->|GET /api/health| PUB1[public]
+    APIS -->|GET /api/terminal/info| PUB2[public]
+    APIS -->|GET /api/sandbox/preview/*| PUB3[public iframe proxy]
+    APIS -->|GET /metrics| PUB4[public, internal scraping]
+    APIS -->|/privacy /terms| PUB5[public static pages]
+    APIS -->|everything else /api/*| AUTH{Authorization: Bearer<br/>Firebase ID token}
+    APIS -->|/live or /terminal upgrade| WSAUTH{?token= query param}
+    AUTH -->|missing/invalid| 401[401 Unauthorized]
+    AUTH -->|verified| OK1[res.locals.authUser.uid -> downstream]
+    WSAUTH -->|missing/invalid| WS401[upgrade rejected 401, socket destroyed]
+    WSAUTH -->|verified| OK2[connection accepted]
+    PUB1 --> DONE[Done]
+    PUB2 --> DONE
+    PUB3 --> DONE
+    PUB4 --> DONE
+    PUB5 --> DONE
+    OK1 --> DONE
+    OK2 --> DONE
+    style AUTH fill:#fdd
+    style WSAUTH fill:#fdd
+```
+
+Token verification uses `jose` (JWKS + RS256) in `server/auth.ts` — do **not** switch back to `firebase-admin`'s `verifyIdToken()`. `AUTH_DISABLED=1` turns the gate off for local dev (then the legacy `x-wa-uid`/`x-wa-email` headers are honored for WhatsApp). Verified uid is used for per-user WhatsApp sessions, the task store, and Google OAuth token lookups (`google_tokens/{uid}` in RTDB).
 
 ## 1. Server boot & component topology
 
 ```mermaid
 flowchart TD
-    BOOT[startServer] --> SVC[Start internal WS services]
+    BOOT[startServer] --> VAL[validateToolCoverage<br/>declarations == catalog == registry]
+    VAL --> SVC[Start internal WS services]
     SVC --> P1[sandboxService :5556]
     SVC --> P2[cliService :5557]
     SVC --> P3[browserService :5558<br/>Playwright Chrome]
     SVC --> P4[computerService :5559]
     SVC --> P5[codingAgentService :5560<br/>spawns OpenCode CLI]
 
-    BOOT --> HTTP[Express app :5555]
-    HTTP --> WS[WS /live upgrade handler]
-    HTTP --> REST[/api/health, /api/tools/*,<br/>/api/workspace/*, /api/whatsapp/*/]
+    BOOT --> HTTP[Express app :PORT (default 5555)]
+    HTTP --> WS[WS /live + /terminal upgrade handler]
+    HTTP --> REST[/api/health, /api/tools/*, /api/workspace/*,<br/>/api/whatsapp/*, /api/tasks]
     HTTP --> VITE[Vite middleware dev<br/>or dist/ static prod]
 
-    BOOT --> WA[initWhatsAppSession auto-init]
-    WA --> RTDB[loadStoreFromRTDB<br/>restore chats BEFORE connecting]
-    RTDB --> BA[Baileys connectSocket]
-    BA --> WA2[WhatsApp Web]
-
-    BOOT --> MEM["MemoryCore gateway<br/>127.0.0.1:8420 (external service)"]
+    BOOT --> TSK[initTaskStore<br/>in-memory + RTDB tasks/{uid}]
+    BOOT --> MEM["MemoryCore gateway<br/>127.0.0.1:8420 (external service)<br/>with local JSON fallback"]
+    WA[whatsapp-tools.ts module load] --> WA2[initWhatsAppSession unless WHATSAPP_AUTO_INIT=0]
+    WA2 --> BA[Baileys connectSocket -> WhatsApp Web]
     WA --> FLUSH[SIGTERM/SIGINT -> flushStoreOnShutdown<br/>clear timers + persistStore, 5s bound]
 
     PROXY[server/toolProxy.ts sendToService] --> P1
@@ -74,23 +102,32 @@ sequenceDiagram
     S-->>U: status: listening
 ```
 
-## 3. Tool call dispatch (67 tools)
+## 3. Tool call dispatch (71 tools, via registry + skill routing)
+
+Every Gemini function call enters `handleFunctionCallWithSkills` (`server/toolRoutingMiddleware.ts`) and is decided ALLOW / REROUTE / CLARIFY / BLOCK before dispatch:
 
 ```mermaid
 flowchart TD
-    A[Gemini toolCall] --> B{name?}
-    B -->|executeCodeSandbox| C[sandbox :5556]
-    B -->|runCliCommand| D[cli :5557]
-    B -->|runBrowserAutomation| E[browser :5558]
-    B -->|runComputerControl| F[computer :5559]
-    B -->|runCodingAgent / deployAgentTask| G[codingAgent :5560<br/>OpenCode CLI]
-    B -->|18x whatsapp_* tools| H[whatsapp-tools.ts<br/>Baileys -> WhatsApp Web]
-    B -->|33x google_* tools| I[googleWorkspace.ts<br/>Google APIs]
-    B -->|qwen* / generateVideo| J[QwenCloud / DashScope<br/>only on explicit request]
-    B -->|remember_memory / recall_memory / get_core_memory| K[MemoryCore :8420]
-    B -->|webSearch / getWeather / getSystemInfo| L[lightweight handlers]
-    B -->|updateCanvasVisual| M[canvas card -> SPA]
-    B -->|unknown| N[error: Unknown tool name]
+    A[Gemini toolCall] --> B[resolveToolCall<br/>toolRoutingMiddleware.ts]
+    B --> CAT{in toolCatalog?}
+    CAT -->|no| BLK[BLOCK: I don't know how to use this tool]
+    CAT -->|yes| Q{skill route resolves?}
+    Q -->|no| RER[REROUTE / CLARIFY: ask what the user meant]
+    Q -->|yes, skill intent matches| ALLOW[ALLOW -> skillExecutor]
+    ALLOW --> S[run skill steps in order:<br/>validate -> resolve -> confirm -> tool -> respond]
+    S --> DISP[dispatchTool -> toolRegistry]
+    DISP -->|executeCodeSandbox| C[sandbox :5556]
+    DISP -->|runCliCommand| D[cli :5557]
+    DISP -->|runBrowserAutomation| E[browser :5558]
+    DISP -->|runComputerControl| F[computer :5559]
+    DISP -->|runCodingAgent / deployAgentTask| G[codingAgent :5560<br/>OpenCode CLI]
+    DISP -->|18x whatsapp_* tools| H[whatsapp-tools.ts<br/>Baileys -> WhatsApp Web]
+    DISP -->|33x google_* tools| I[googleWorkspace.ts<br/>Google APIs]
+    DISP -->|qwen* / generateVideo| J[QwenCloud / DashScope<br/>only on explicit request<br/>per-user FIFO queue]
+    DISP -->|remember_memory / recall_memory / get_core_memory| K[MemoryCore :8420<br/>local fallback if down]
+    DISP -->|webSearch / getWeather / getSystemInfo| L[lightweight handlers]
+    DISP -->|updateCanvasVisual| M[canvas card -> SPA]
+    DISP -->|unknown| N[error: Unknown tool name]
     C --> R[wrap result]
     D --> R
     E --> R
@@ -103,26 +140,39 @@ flowchart TD
     L --> R
     M --> R
     N --> R
-    R --> S[broadcast toolResult -> SPA]
-    S --> T[liveSession.sendToolResponse<br/>Gemini turns result into speech]
+    R --> S2[broadcast toolResult -> SPA<br/>persist via upsertTaskFromBroadcast]
+    S2 --> T[liveSession.sendToolResponse<br/>Gemini turns result into speech]
 ```
 
-## 4. Memory learning flow (MemoryCore)
+Declarations live in `server/toolDeclarations.ts` (moved out of server.ts). Boot-time `validateToolCoverage()` and `validateSkillCoverage()` fail fast if the declarations, the catalog (`server/toolCatalog.ts`), the registry, or the skill routes drift out of sync. Media tool model strings are pinned to the Token Plan allowlists in `server/tools.ts` (image `wan2.7-image-pro`/`wan2.7-image`, video `happyhorse-1.1-t2v` only, TTS `qwen-audio-3.0-tts-plus`).
+
+## 4. Memory learning flow (MemoryCore, with local fallback)
 
 ```mermaid
 flowchart LR
     U[Boss says something important] --> R[remember_memory tool]
-    R --> ADD[POST /v2/conversation/add]
+    R --> GW{gateway reachable?}
+    GW -->|yes| ADD[POST /v2/conversation/add]
+    GW -->|no| FB1[local JSON store append]
     ADD --> L0[(L0 conversation store)]
     Q[Boss asks about the past] --> RC[recall_memory tool]
-    RC --> SRCH[POST /v2/conversation/search<br/>BM25 keyword search]
+    RC --> GW2{gateway reachable?}
+    GW2 -->|yes| SRCH[POST /v2/conversation/search<br/>BM25 keyword search]
+    GW2 -->|no| FB2[local BM25 search over fallback store]
     SRCH --> L0
     SRCH --> HITS[ranked matches + relevance scores]
+    FB1 --> FBF[(data/memory-fallback.json)]
+    FB2 --> FBF
     HITS --> SPOKEN[Beatrice answers grounded in memory]
     CORE[Boss context] --> C[get_core_memory tool]
-    C --> CR[POST /v2/core/read<br/>L3 persona/core profile]
+    C --> GW3{gateway reachable?}
+    GW3 -->|yes| CR[POST /v2/core/read<br/>L3 persona/core profile]
+    CR --> CACHE[cache latest profile locally]
+    GW3 -->|no| CACHED[return cached profile]
     CR --> INJ[injected into system prompt on WS connect]
 ```
+
+Fallback store is a capped (1000-entry) JSON file at `data/memory-fallback.json` (`MEMORY_FALLBACK_FILE` override for tests); successful gateway reads refresh the cached core profile so `get_core_memory` keeps working while the gateway is down.
 
 ## 5. WhatsApp lifecycle & reconnect
 
@@ -181,21 +231,27 @@ sequenceDiagram
 | server→client | `toolCall` / `toolResult` | id + name + args/result |
 | server→client | `status` | connecting / connected / speaking / listening / error |
 | server→client | `interrupted`, `turnComplete` | turn lifecycle |
-| server→client | `sandboxOutput`, `cliOutput`, `browserUpdate`, `computerUpdate`, `codingAgentUpdate`, `canvasUpdate`, `videoGenerationUpdate`, `qwencloudUpdate`, `whatsappStatus` | streamed tool output |
+| server→client | `sandboxOutput`, `cliOutput`, `browserUpdate`, `computerUpdate`, `agentUpdate`, `codingAgentUpdate`, `canvasUpdate`, `videoGenerationUpdate`, `qwencloudUpdate`, `whatsappStatus`, `skillExecutionUpdate` | streamed tool output (skillExecutionUpdate tracks skill step progress) |
 
 ## 8. REST endpoints
 
 | Route | Purpose |
 |---|---|
-| `GET /api/health` | status, app, live model, API-key configured |
-| `GET /api/services` | internal service ports + ws stream URLs (5556–5559) |
+| `GET /api/health` | status, app, live model, API-key configured (public) |
+| `GET /api/terminal/info` | SSH host/port/user for the browser terminal (public) |
+| `GET /api/services` | internal service ports + ws stream URLs (5556–5560) |
+| `GET /api/tasks` · `POST /api/tasks` · `GET/PATCH/DELETE /api/tasks/:id` | per-user generation task history (RTDB-backed, requires verified uid) |
 | `POST /api/tools/execute-code` · `/api/tools/cli` · `/api/tools/agent` · `/api/tools/canvas` · `/api/tools/weather` · `/api/tools/search` | direct tool invocations (no WS needed) |
 | `GET /api/workspace/gmail/messages` · `/api/workspace/contacts` · `POST /api/workspace/gmail/send` · `/api/workspace/forms/create` · `GET /api/workspace/forms/list` | Google Workspace over REST |
 | `GET /api/whatsapp/status` · `/api/whatsapp/capabilities` | WhatsApp health + internal action catalog |
 | `POST /api/whatsapp/pair` (phone) · `/api/whatsapp/pair-qr` · `/api/whatsapp/cancel` · `/api/whatsapp/logout` · `/api/whatsapp/approve` | WhatsApp lifecycle + send approval |
-| `GET /api/sandbox/preview/:file` | proxy sandbox HTML previews (frontend iframe) |
+| `GET /api/whatsapp/boss-mode` · `POST /api/whatsapp/boss-mode` | read/set Boss Mode toggle |
+| `POST /api/whatsapp/reset` | hard-reset a stuck WhatsApp session (403-banned socket) |
+| `GET /api/sandbox/preview/:file` | proxy sandbox HTML previews (frontend iframe, public) |
 | `GET /privacy` · `/terms` | public static pages (no auth) |
 | `GET *` (prod) | SPA fallback → `dist/index.html` |
+
+Video generation (`generateVideo` / `qwenVideoGenerate`) is enqueued in a per-user FIFO queue (`server/tools.ts`): one render runs server-wide at a time, each user may hold at most one running + one queued job, and queued jobs broadcast a `queued` status with their position. Memory tool results are returned with `source: 'local-fallback'` when the MemoryCore gateway is unreachable.
 
 ## 9. Manual tool triggers (no voice)
 

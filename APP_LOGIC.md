@@ -1,6 +1,6 @@
 # App Logic — Beatrice OSS
 
-How the system actually works at runtime. All flows below are traced from `server.ts`, `server/tools.ts`, `server/toolProxy.ts` and `server/services/`.
+How the system actually works at runtime. All flows below are traced from `server.ts`, `server/tools.ts`, `server/toolProxy.ts` and `server/services/`. The docs predate parts of the Aug 2026 hardening — see AGENTS.md for the canonical module map (auth gating, tool registry, skill routing, isolate, logger/metrics, terminalBridge).
 
 ## Runtime topology
 
@@ -9,8 +9,8 @@ flowchart LR
     subgraph Client
       UI[React SPA<br/>src/main.tsx]
     end
-    UI -- "WS /live (binary + JSON)" --> SRV[server.ts<br/>port 5555]
-    UI -- "REST /api/*" --> SRV
+    UI -- "WS /live (binary + JSON) ?token=" --> SRV[server.ts<br/>port 5555]
+    UI -- "REST /api/* Bearer" --> SRV
     SRV -- "HTTP JSON" --> VITE[Vite middleware dev<br/>or dist/ static prod]
     SRV -- "WS streams" --> PROXY[server/toolProxy.ts<br/>sendToService]
     PROXY --> P1[sandboxService :5556]
@@ -22,7 +22,10 @@ flowchart LR
     SRV -- "REST" --> G[googleWorkspace.ts<br/>Google APIs]
     SRV -- "Gemini Live API" --> L[gemini-3.1-flash-live-preview]
     SRV -- "REST" --> Q[QwenCloud / DashScope]
+    SRV -- "REST" --> M[MemoryCore :8420<br/>+ local JSON fallback]
 ```
+
+Auth is ON by default: every `/api/*` route (except `/health`, `/terminal/info`, `/sandbox/preview/*`, `/metrics`, `/privacy`, `/terms`) requires `Authorization: Bearer <Firebase ID token>` (verified with `jose`, `server/auth.ts`), and the WS `/live` + `/terminal` upgrades require `?token=` (the browser WS API can't set headers). `AUTH_DISABLED=1` disables the gate for local dev. The verified uid feeds per-user WhatsApp sessions, the task store, and RTDB `google_tokens/{uid}`.
 
 ## 1. Live voice conversation (end-to-end)
 
@@ -35,10 +38,10 @@ sequenceDiagram
     participant T as Tool handlers
     participant SV as Internal WS services
 
-    U->>S: WS /live upgrade
+    U->>S: WS /live upgrade ?token=
     S-->>U: status: connecting
     U->>S: {type: sessionBootstrap, language, voice, history}
-    S->>L: ai.live.connect(model, systemInstruction=system_prompt.md + KB, tools=67 declarations)
+    S->>L: ai.live.connect(model, systemInstruction=system_prompt.md + KB, tools=71 declarations)
     S-->>U: status: connected
     U->>S: {type: audio, base64 pcm16k} / video / text / attachment
     S->>L: sendRealtimeInput(audio|video|text)
@@ -46,7 +49,8 @@ sequenceDiagram
     S-->>U: audio (base64) + transcript + status: speaking
     L-->>S: toolCall (functionCalls)
     S-->>U: toolCall (id, name, args)
-    S->>T: dispatch by name (67-way if/else)
+    S->>S: resolveToolCall: ALLOW/REROUTE/CLARIFY/BLOCK
+    S->>T: dispatchTool via registry + skillExecutor
     T->>SV: forwardToService (sandbox/cli/browser/computer/codingAgent)
     SV-->>T: streamed chunks + final result
     T-->>S: toolResult
@@ -62,26 +66,33 @@ Notes:
 - The browser WS is the **only** connection to the browser — one socket carries audio in both directions, transcripts, tool calls/results, and streamed service output.
 - Language/voice/persona come from the bootstrap and can be updated live via `updateSessionPrefs` (soft-restarts the Live session only).
 - A `bootstrap` delay of 1.5s guards against starting Live before the client sends prefs.
+- **One function per turn**: extra `functionCalls` in the same model message are skipped with "Skipped — one function at a time" so the model must proceed one confirmed call at a time.
+- Tool declarations are defined once in `server/toolDeclarations.ts` (71 tools), cross-checked at boot by `validateToolCoverage()` against `server/toolCatalog.ts` and the registry.
 
 ## 2. Tool call dispatch
 
 ```mermaid
 flowchart TD
-    A[Gemini Live toolCall] --> B{name?}
-    B -->|executeCodeSandbox| C[handleExecuteCodeSandbox]
-    B -->|runCliCommand| D[handleRunCliCommand]
-    B -->|deployAgentTask / runCodingAgent| E[spawn sub-agent / OpenCode CLI]
-    B -->|getWeather / webSearch / getSystemInfo| F[lightweight handlers]
-    B -->|qwen* / generateVideo| G["QwenCloud + DashScope REST<br/>only on explicit request"]
-    B -->|runBrowserAutomation / runComputerControl| H[browser :5558 / computer :5559]
-    B -->|33x Google tools| I[googleWorkspace.ts]
-    B -->|18x whatsapp_* tools| J[whatsapp-tools.ts Baileys]
-    B -->|remember_memory / recall_memory / get_core_memory| K2[MemoryCore gateway :8420]
-    B -->|updateCanvasVisual| K[canvas card to SPA]
-    B -->|unknown| L[error: Unknown tool name]
-    C --> M[wrap result + sendToolResponse back to Live]
-    D --> M
-    E --> M
+    A[Gemini Live toolCall] --> B[handleFunctionCallWithSkills<br/>toolRoutingMiddleware.ts]
+    B --> C{resolveToolCall}
+    C -->|ALLOW| D[skillExecutor runs skill steps]
+    C -->|REROUTE / CLARIFY| D2[ask user which intent they meant]
+    C -->|BLOCK| D3["I don't know how to use this tool"]
+    D --> E[dispatchTool -> toolRegistry]
+    E -->|executeCodeSandbox| C1[handleExecuteCodeSandbox]
+    E -->|runCliCommand| D1[handleRunCliCommand]
+    E -->|deployAgentTask / runCodingAgent| E1[spawn sub-agent / OpenCode CLI]
+    E -->|getWeather / webSearch / getSystemInfo| F[lightweight handlers]
+    E -->|qwen* / generateVideo| G["QwenCloud + DashScope REST<br/>only on explicit request<br/>per-user FIFO queue"]
+    E -->|runBrowserAutomation / runComputerControl| H[browser :5558 / computer :5559]
+    E -->|33x Google tools| I[googleWorkspace.ts]
+    E -->|18x whatsapp_* tools| J[whatsapp-tools.ts Baileys]
+    E -->|remember_memory / recall_memory / get_core_memory| K2[MemoryCore :8420<br/>local JSON fallback if down]
+    E -->|updateCanvasVisual| K[canvas card to SPA]
+    E -->|unknown| L[error: Unknown tool name]
+    C1 --> M[wrap result + sendToolResponse back to Live]
+    D1 --> M
+    E1 --> M
     F --> M
     G --> M
     H --> M
@@ -92,7 +103,7 @@ flowchart TD
     L --> M
 ```
 
-Every path: broadcast `toolCall` → run handler → broadcast `toolResult` → `liveSession.sendToolResponse({functionResponses})` so Gemini turns the result into speech.
+Every path: broadcast `toolCall` → run handler → broadcast `toolResult` → `liveSession.sendToolResponse({functionResponses})` so Gemini turns the result into speech. Skill routing (queryRouter → skillRouter → skillExecutor, `server/skills/*.skill.ts`) sits in front of every dispatch and resolves referential follow-ups ("make it shorter") against the conversation's active skill.
 
 ## 3. WhatsApp flow (send + pairing)
 
@@ -177,24 +188,27 @@ The same handlers are reachable without Gemini: the SPA sends `runSandbox`, `run
 | server→client | `toolCall` / `toolResult` | id + name + args/result |
 | server→client | `status` | connecting / connected / speaking / listening / error |
 | server→client | `interrupted`, `turnComplete` | turn lifecycle |
-| server→client | `sandboxOutput`, `cliOutput`, `browserUpdate`, `computerUpdate`, `codingAgentUpdate`, `canvasUpdate`, `videoGenerationUpdate`, `qwencloudUpdate`, `whatsappStatus` | streamed tool output |
+| server→client | `sandboxOutput`, `cliOutput`, `browserUpdate`, `computerUpdate`, `agentUpdate`, `codingAgentUpdate`, `canvasUpdate`, `videoGenerationUpdate`, `qwencloudUpdate`, `whatsappStatus`, `skillExecutionUpdate` | streamed tool output (skillExecutionUpdate tracks skill step progress) |
 
 ## 8. REST endpoints
 
 | Route | Purpose |
 |---|---|
-| `GET /api/health` | status + model + key configured |
+| `GET /api/health` | status + model + key configured (public) |
+| `GET /api/terminal/info` | SSH host/port/user for the browser terminal (public) |
 | `GET /api/services` | tool service ports 5556–5560 |
+| `GET /api/tasks` · `POST /api/tasks` · `GET/PATCH/DELETE /api/tasks/:id` | per-user generation task history (RTDB-backed, requires verified uid; anonymous POST → 401, anonymous list → empty) |
 | `POST /api/tools/execute-code` · `/api/tools/cli` · `/api/tools/agent` · `/api/tools/canvas` · `/api/tools/weather` · `/api/tools/search` | direct tool invocations |
 | `GET /api/workspace/gmail/messages` · `/api/workspace/contacts` · `POST /api/workspace/gmail/send` · `/api/workspace/forms/create` · `GET /api/workspace/forms/list` | Google Workspace over REST |
 | `GET /api/whatsapp/status` · `/capabilities` | WhatsApp health |
 | `POST /api/whatsapp/pair` · `/pair-qr` · `/cancel` · `/logout` · `/approve` | WhatsApp lifecycle |
-| `GET /api/sandbox/preview/:file` | proxy sandbox HTML previews (frontend iframe) |
+| `GET/POST /api/whatsapp/boss-mode` · `POST /api/whatsapp/reset` | Boss Mode toggle · hard-reset stuck session |
+| `GET /api/sandbox/preview/:file` | proxy sandbox HTML previews (frontend iframe, public) |
 | `GET /privacy` · `/terms` | public static pages (no auth) |
 
-## 9. Memory learning (MemoryCore)
+## 9. Memory learning (MemoryCore + local fallback)
 
-Beatrice saves and recalls conversations via the local MemoryCore gateway (`127.0.0.1:8420`, auth via `TDAI_LLM_API_KEY` / `TDAI_LLM_SERVICE_ID`).
+Beatrice saves and recalls conversations via the local MemoryCore gateway (`127.0.0.1:8420`, auth via `TDAI_LLM_API_KEY` / `TDAI_LLM_SERVICE_ID`). If the gateway is unreachable (2s timeout), the memory handlers transparently fall back to a capped local JSON store (`data/memory-fallback.json`, BM25-ish recall, cached core profile) and mark results `source: 'local-fallback'` — the tools never hard-fail on a dead gateway.
 
 ```mermaid
 flowchart LR
@@ -232,11 +246,15 @@ flowchart TD
     N --> O["flushStoreOnShutdown<br/>persistStore then exit (5s bound)"]
 ```
 
-Boss Mode details: when ON, `maybeAutoReply` auto-replies to incoming DMs (`@s.whatsapp.net`, skips own/`3A`-broadcast/stub msgs) using Gemini `gemini-2.5-flash` (`getLocalGemini` lazy import), mimicking the Boss's style from `getWhatsAppKnowledgeBase(force)` (contacts + style + recent conversations, 5-min cache). Max 400 chars, 60s cooldown per chat, marks read. Toggle via `set_whatsapp_boss_mode` tool or `GET/POST /api/whatsapp/boss-mode`; persisted in `data/whatsapp-auth/.meta.json`.
+Boss Mode details: when ON, `maybeAutoReply` auto-replies to incoming DMs (`@s.whatsapp.net`, skips own/`3A`-broadcast/stub msgs) using Gemini `gemini-2.5-flash` (`getLocalGemini` lazy import), mimicking the Boss's style from `getWhatsAppKnowledgeBase(force)` (contacts + style + recent conversations, 5-min cache). Max 400 chars, 60s cooldown per chat, marks read. Toggle via `set_whatsapp_boss_mode` tool or `GET/POST /api/whatsapp/boss-mode`; persisted per-user in `data/whatsapp-auth/{uid}/.meta.json`. Sessions are **per-user** (uid from the verified token); one active socket at a time; `POST /api/whatsapp/reset` hard-resets a stuck session.
 
 Shutdown: `SIGTERM`/`SIGINT` → `flushStoreOnShutdown` clears reconnect/heartbeat/persist timers and calls `persistStore()` before exit (5s bound), so the newest messages aren't dropped by the 4s debounce during restarts.
 
-## 11. Deployment flow
+## 11. Task history & video queue
+
+Every tool result and media-generation broadcast is also folded into the per-user task store (`server/taskStore.ts`, in-memory + RTDB `tasks/{uid}`), surfaced in the SPA's generation-activity panel and via `/api/tasks`. Video generation jobs are serialized through a per-user FIFO queue (`enqueueVideoGeneration` in `server/tools.ts`, replaces the old global lock): at most one render per user runs while another waits, positions are broadcast so the UI can show "job 2 of 2", and finished videos land in Firebase Storage with persistent download URLs.
+
+## 12. Deployment flow
 
 ```mermaid
 flowchart TD
