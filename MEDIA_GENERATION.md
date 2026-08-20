@@ -129,22 +129,24 @@ All QwenCloud media handlers now automatically fall back to the next model in th
 
 | Tool | Default chain | Override rule |
 |------|---------------|---------------|
-| `qwenImageGenerate` / `qwenImageEdit` | `qwen-image-2.0-pro` -> `z-image-turbo` -> `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried |
-| `qwenVideoGenerate` | `happyhorse-1.1-t2v` -> `wan3.0-video` -> `wan2.7-t2v` -> `wan2.6-t2v` | If Boss specifies `model`, only that model is tried |
-| `generateVideo` | `happyhorse-1.1-t2v` -> `wan3.0-video` -> `wan2.7-t2v` -> `wan2.6-t2v` | No `model` parameter exposed |
-| `qwenTts` | `qwen3-tts-flash` -> `qwen3-tts` | If Boss specifies `model`, only that model is tried |
+| `qwenImageGenerate` / `qwenImageEdit` | `qwen-image-2.0-pro` -> `z-image-turbo` -> `qwen-image-3.0-pro` -> `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried |
+| `qwenVideoGenerate` | `happyhorse-1.1-t2v` -> `wan3.0-video` | If Boss specifies `model`, only that model is tried |
+| `generateVideo` | `happyhorse-1.1-t2v` -> `wan3.0-video` | No `model` parameter exposed |
+| `qwenTts` | `qwen-audio-3.0-tts-plus` | If Boss specifies `model`, only that model is tried |
 
 The `model` field is included in all broadcast updates so the UI and logs show which model actually succeeded.
 
 ## Execution flow
 
 1. **Explicit authorization check** — confirm the Boss asked for media generation.
-2. **Classify media type** — image / image-edit / video / speech.
-3. **Select the right tool** from the decision table above.
-4. **Set sensible defaults** for all optional parameters (never leave required params empty).
-5. **Call the tool** and wait for the result.
-6. **Validate the result** — if the tool returns a URL/path, confirm it exists; if it returns an error, report the error exactly.
-7. **Present the result** to the Boss: share the URL, describe what was generated, and offer next steps.
+2. **Gather the specs before triggering (mandatory)** — ask the Boss for whatever the request does not already specify: aspect ratio (16:9 / 9:16 / 1:1 / 4:3 — never assume), image size/resolution (1K/2K/4K) + style, video resolution (480P/720P/1080P) + duration + motion direction. If the Boss says "any is fine", pick the safe defaults and say them.
+3. **Clarify & confirm the final prompt (mandatory)** — restate the complete final spec (description + ratio + resolution/size + duration + style) in one short message and get explicit agreement BEFORE triggering any model. If the Boss changes anything, re-confirm. Never send the final prompt trigger with unagreed specs.
+4. **Classify media type** — image / image-edit / video / speech.
+5. **Select the right tool** from the decision table above.
+6. **Set sensible defaults** for any parameter the Boss did not pin down (never leave required params empty).
+7. **Call the tool** (only after step 3's confirmation) and wait for the result.
+8. **Validate the result** — if the tool returns a URL/path, confirm it exists; if it returns an error, report the error exactly.
+9. **Present the result** to the Boss: share the URL, describe what was generated, and offer next steps.
 
 ## Error handling
 
