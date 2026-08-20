@@ -203,7 +203,7 @@ export function GenerationTaskCard({
         </p>
       ) : null}
 
-      {isMedia && isTaskActive(task.status) ? (
+      {isMedia && isTaskActive(task) ? (
         <MediaStageAnimation type={task.type} />
       ) : task.stage || task.message ? (
         <div className="min-h-0">
