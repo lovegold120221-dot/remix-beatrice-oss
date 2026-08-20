@@ -50,6 +50,7 @@ import {
   handleRunComputerControl,
   handleUpdateCanvasVisual,
   handleWebSearch,
+  videoQueueStats,
 } from './server/tools.js';
 import {
   startSandboxService,
@@ -701,6 +702,7 @@ async function startServer() {
     recentTurns?: { role: string; text: string; timestamp?: number }[];
     lastInteractionAt?: number;
     userDisplayName?: string;
+    uid?: string | null;
   }): Promise<string> {
     const base = loadGlobalSystemPrompt();
     const lang = (bootstrap?.preferredLanguage || 'auto').trim() || 'auto';
@@ -753,7 +755,27 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
       ? `\n\n${waContext}\n- If the Boss asks about WhatsApp, you have live context above plus read_whatsapp_chats / get_whatsapp_message_history. Resolve contacts before sending; never invent JIDs.`
       : '';
 
-    return `${base}\n\n${continuity}${waBlock}`;
+    let taskBlock = '';
+    const uid = bootstrap?.uid;
+    if (uid) {
+      try {
+        const tasks = (await listTasks(uid, 12)).filter((t) => t.prompt || t.stage || t.output);
+        if (tasks.length) {
+          const lines = tasks.map((t) => {
+            const prompt = String(t.prompt || t.stage || '').replace(/\s+/g, ' ').slice(0, 160);
+            const when = t.createdAt
+              ? new Date(t.createdAt).toISOString().slice(0, 16).replace('T', ' ')
+              : 'unknown time';
+            return `- [${t.type} | ${t.status}] (${when}) ${prompt}${t.output ? ' — finished, artifact available' : ''}`;
+          });
+          taskBlock = `\n\n### RECENT TASK HISTORY (user's generation history — KNOW THIS COLD; reference it whenever the Boss asks about past work)\n${lines.join('\n')}`;
+        }
+      } catch (err: any) {
+        console.warn('[Task history] unavailable for instruction:', err?.message || err);
+      }
+    }
+
+    return `${base}\n\n${continuity}${waBlock}${taskBlock}`;
   }
 
   // WebSocket Live Connection Handler
@@ -807,6 +829,19 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
     const startLiveSession = async (reason: string) => {
       if (clientClosed || liveStarting) return;
       if (liveSession && isConnected) return;
+      // Never auto-restart the Live connection while a background generation
+      // task (e.g. video render) is still running — the restart would reset
+      // the conversation mid-generation. Server-side generation continues
+      // regardless; retry once the queue is idle.
+      if (reason.startsWith('auto-retry')) {
+        const qs = videoQueueStats();
+        if (qs.running || qs.queueLength > 0) {
+          console.log(
+            `[Live] Deferring auto-retry: video generation still ${qs.running ? 'rendering' : 'queued'} (${qs.queueLength} queued)`
+          );
+          return;
+        }
+      }
       if (reason.startsWith('auto-retry')) liveRetryCount += 1;
       else liveRetryCount = 0;
       liveStarting = true;

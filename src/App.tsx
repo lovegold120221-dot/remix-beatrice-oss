@@ -156,6 +156,8 @@ export default function App() {
   // Active Mobile Drawer: 'none' | 'chat' | 'video' | 'tools'
   const [activeDrawer, setActiveDrawer] = useState<'none' | 'chat' | 'video' | 'tools'>('none');
   const generation = useGenerationTasks();
+  const activeTaskCountRef = useRef(0);
+  activeTaskCountRef.current = generation.activeCount;
 
   const defaultConfig: BeatriceConfig = {
     voiceName: 'Aoede',
@@ -983,7 +985,10 @@ export default function App() {
           console.log(`[Backoff] Scheduling reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} in ${(delay / 1000).toFixed(1)}s...`);
 
           setTranscripts((prev) => {
-            const noticeText = `Connection lost. Automatically reconnecting in ${(delay / 1000).toFixed(1)}s (Attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})...`;
+            const waitingOnTasks = activeTaskCountRef.current > 0;
+            const noticeText = waitingOnTasks
+              ? 'Connection lost. Waiting for active generation tasks to finish before reconnecting...'
+              : `Connection lost. Automatically reconnecting in ${(delay / 1000).toFixed(1)}s (Attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})...`;
             const last = prev[prev.length - 1];
             if (last && last.role === 'system' && last.text.startsWith('Connection lost.')) {
               return prev.slice(0, -1).concat({
@@ -1005,7 +1010,17 @@ export default function App() {
           });
 
           reconnectTimerRef.current = setTimeout(() => {
-            connectWebSocket();
+            // Never restart the bridge mid-generation: generation runs
+            // server-side (broadcasts keep flowing + are re-synced on
+            // reconnect), so wait for tasks to settle before reconnecting.
+            const reconnectWhenIdle = () => {
+              if (activeTaskCountRef.current > 0) {
+                reconnectTimerRef.current = setTimeout(reconnectWhenIdle, 5000);
+              } else {
+                connectWebSocket();
+              }
+            };
+            reconnectWhenIdle();
           }, delay);
         } else {
           console.warn(`[Backoff] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached.`);
