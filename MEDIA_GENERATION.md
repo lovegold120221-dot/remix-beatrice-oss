@@ -129,7 +129,7 @@ All QwenCloud media handlers now automatically fall back to the next model in th
 
 | Tool | Default chain | Override rule |
 |------|---------------|---------------|
-| `qwenImageGenerate` / `qwenImageEdit` | `qwen-image-2.0-pro` -> `z-image-turbo` -> `qwen-image-3.0-pro` -> `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried |
+| `qwenImageGenerate` / `qwenImageEdit` | `qwen-image-2.0-pro-2026-06-22` -> `qwen-image-2.0-pro` -> `qwen-image-2.0` -> `z-image-turbo` -> `qwen-image-3.0-pro` -> `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried. qwen-image-2.0-family models use the slimmer params (`n`/`negative_prompt`/`watermark`, no `size`/`prompt_extend`); other models accept `size`. |
 | `qwenVideoGenerate` | `happyhorse-1.1-t2v` -> `wan3.0-video` | If Boss specifies `model`, only that model is tried |
 | `generateVideo` | `happyhorse-1.1-t2v` -> `wan3.0-video` | No `model` parameter exposed |
 | `qwenTts` | `qwen-audio-3.0-tts-plus` | If Boss specifies `model`, only that model is tried |

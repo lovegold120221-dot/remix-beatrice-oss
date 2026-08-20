@@ -41,8 +41,8 @@ const DASHSCOPE_INTL_BASE = 'https://dashscope-intl.aliyuncs.com/api/v1';
 // Source: https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview
 // qwen-image-2.0-pro, z-image-turbo and wan2.6-t2i run on the international
 // endpoint; the qwen-image-3.0-pro / wan2.7-image models run on Token Plan.
-const INTEL_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'wan2.6-t2i'];
-const QWEN_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'wan2.6-t2i', 'qwen-image-3.0-pro', 'wan2.7-image-pro', 'wan2.7-image'];
+const INTEL_IMAGE_MODELS = ['qwen-image-2.0-pro-2026-06-22', 'qwen-image-2.0-pro', 'qwen-image-2.0', 'z-image-turbo', 'wan2.6-t2i'];
+const QWEN_IMAGE_MODELS = ['qwen-image-2.0-pro-2026-06-22', 'qwen-image-2.0-pro', 'qwen-image-2.0', 'z-image-turbo', 'wan2.6-t2i', 'qwen-image-3.0-pro', 'wan2.7-image-pro', 'wan2.7-image'];
 // Video models rotate from most capable to fallback. happyhorse-1.1-t2v and
 // wan3.0-video both run on the international endpoint (async submit + task
 // poll); wan3.0-video is currently stuck PENDING intl-side, so happyhorse is
@@ -58,6 +58,19 @@ const TOKEN_PLAN_KEY = DASHSCOPE_LEGACY_API_KEY || DASHSCOPE_API_KEY;
 function imageEndpointFor(model: string): { base: string; key: string } {
   if (INTEL_IMAGE_MODELS.includes(model)) return { base: DASHSCOPE_INTL_BASE, key: DASHSCOPE_API_KEY };
   return { base: DASHSCOPE_BASE, key: TOKEN_PLAN_KEY };
+}
+
+// The qwen-image-2.0 family (verified via curl on the intl endpoint) uses a
+// slimmer parameters shape — n / negative_prompt / watermark, and NO size or
+// prompt_extend. Other image models keep the extended shape.
+function isQwenImageFamily(model: string): boolean {
+  return model.startsWith('qwen-image-2.0');
+}
+function imageParameters(args: { n?: number; watermark?: boolean; size?: string }, model: string): Record<string, unknown> {
+  if (isQwenImageFamily(model)) {
+    return { n: args.n ?? 1, negative_prompt: '', watermark: args.watermark ?? false };
+  }
+  return { prompt_extend: false, size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false };
 }
 
 // Base endpoint + auth key for a given video model (happyhorse and wan3.0 are intl-only).
@@ -86,7 +99,7 @@ async function tryModelChain<T>(
       lastError = err?.message || String(err);
     }
   }
-  return { error: lastError ? `All models failed: ${attempted.join(', ')} (${lastError})` : `All models failed: ${attempted.join(', ')}`, attempted };
+  return { error: lastError ? `All generation models failed (${attempted.length} attempted): ${lastError}` : `All generation models failed (${attempted.length} attempted)`, attempted };
 }
 
 function redactKey(text: string) {
@@ -96,6 +109,23 @@ function redactKey(text: string) {
     out = out.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '[REDACTED]');
   }
   return out;
+}
+
+// Never let the underlying model id leak into user-facing error strings or
+// logs — media providers are internal routing details. Replaces any known
+// model token with a generic placeholder.
+const KNOWN_MODELS = [...new Set([...QWEN_IMAGE_MODELS, ...QWEN_VIDEO_MODELS, ...QWEN_TTS_MODELS])];
+function redactModelNames(text: string): string {
+  let out = text;
+  for (const model of KNOWN_MODELS) {
+    if (!model) continue;
+    out = out.replace(new RegExp(model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '[model]');
+  }
+  return out;
+}
+
+function safeErrorOf(err: unknown): string {
+  return redactModelNames(redactKey(err instanceof Error ? err.message : String(err || 'unknown error')));
 }
 
 // ---- Unified activity metadata for media-generation broadcasts ----
@@ -899,11 +929,11 @@ async function runGenerateVideo(
       });
 
       if (!submitRes.ok) {
-        const errText = await submitRes.text().catch(() => 'unknown error');
-        lastError = redactKey(errText);
+        const errText = redactModelNames(redactKey(await submitRes.text().catch(() => 'unknown error')));
+        lastError = errText;
         ctx.broadcast({
           type: 'videoGenerationUpdate',
-          task: { id: taskId, model, status: 'failed', error: lastError, timestamp: Date.now(), ...taskMeta('video', 'failed', lastError) },
+          task: { id: taskId, status: 'failed', error: lastError, timestamp: Date.now(), ...taskMeta('video', 'failed', lastError) },
         });
         continue;
       }
@@ -937,7 +967,7 @@ async function runGenerateVideo(
           type: 'videoGenerationUpdate',
           task: {
             id: taskId,
-            model,
+            ...(status !== 'failed' ? { model } : {}),
             dashTaskId,
             requestId,
             prompt: args.prompt,
@@ -1099,7 +1129,7 @@ export async function handleQwenChat(
     });
     const data = (await res.json()) as any;
     if (!res.ok) {
-      const msg = redactKey(data?.error?.message || data?.message || `DashScope error ${res.status}`);
+      const msg = redactModelNames(redactKey(data?.error?.message || data?.message || `DashScope error ${res.status}`));
       ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'chat', status: 'failed', error: msg, timestamp: Date.now(), ...taskMeta('chat', 'failed', msg) } });
       return { success: false, error: msg };
     }
@@ -1108,7 +1138,7 @@ export async function handleQwenChat(
     ctx.broadcast({ type: 'qwencloudUpdate', task: done });
     return { success: true, taskId, text, model: args.model || 'qwen3.7-plus' };
   } catch (err: any) {
-    const safeError = redactKey(err.message || String(err));
+    const safeError = safeErrorOf(err);
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'chat', status: 'failed', error: safeError, timestamp: Date.now(), ...taskMeta('chat', 'failed', safeError) } });
     return { success: false, error: safeError };
   }
@@ -1146,7 +1176,7 @@ export async function handleQwenImageGenerate(
         const body: any = {
           model,
           input: { messages: [{ role: 'user', content: [{ text: args.prompt }] }] },
-          parameters: { prompt_extend: false, size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false },
+          parameters: imageParameters(args, model),
         };
 
         // z-image-turbo is synchronous on the international endpoint; Token Plan
@@ -1193,9 +1223,9 @@ export async function handleQwenImageGenerate(
     );
 
     if ('error' in chainResult) {
-      const safeError = chainResult.error;
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', status: 'failed', error: safeError, attempted: chainResult.attempted, timestamp: Date.now(), ...taskMeta('image', 'failed', safeError) } });
-      return { success: false, error: safeError, attemptedModels: chainResult.attempted };
+      const safeError = redactModelNames(chainResult.error);
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', status: 'failed', error: safeError, attemptedCount: chainResult.attempted.length, timestamp: Date.now(), ...taskMeta('image', 'failed', safeError) } });
+      return { success: false, error: safeError, attemptedCount: chainResult.attempted.length };
     }
 
     const res = chainResult.result as any;
@@ -1218,7 +1248,7 @@ export async function handleQwenImageGenerate(
     });
     return chainResult.result;
   } catch (err: any) {
-    const safeError = redactKey(err.message || String(err));
+    const safeError = safeErrorOf(err);
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'image', status: 'failed', error: safeError, timestamp: Date.now(), ...taskMeta('image', 'failed', safeError) } });
     return { success: false, error: safeError };
   } finally {
@@ -1257,7 +1287,7 @@ export async function handleQwenImageEdit(
         const body: any = {
           model,
           input: { messages: [{ role: 'user', content }] },
-          parameters: { prompt_extend: false, size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false },
+          parameters: imageParameters(args, model),
         };
 
         // z-image-turbo is synchronous on the international endpoint; Token Plan
@@ -1298,8 +1328,9 @@ export async function handleQwenImageEdit(
     );
 
     if ('error' in chainResult) {
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', status: 'failed', error: chainResult.error, attempted: chainResult.attempted, timestamp: Date.now(), ...taskMeta('image', 'failed', chainResult.error) } });
-      return { success: false, error: chainResult.error, attemptedModels: chainResult.attempted };
+      const safeError = redactModelNames(chainResult.error);
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', status: 'failed', error: safeError, attemptedCount: chainResult.attempted.length, timestamp: Date.now(), ...taskMeta('image', 'failed', safeError) } });
+      return { success: false, error: safeError, attemptedCount: chainResult.attempted.length };
     }
 
     const editRes = chainResult.result as any;
@@ -1322,7 +1353,7 @@ export async function handleQwenImageEdit(
     });
     return chainResult.result;
   } catch (err: any) {
-    const safeError = redactKey(err.message || String(err));
+    const safeError = safeErrorOf(err);
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', status: 'failed', error: safeError, timestamp: Date.now(), ...taskMeta('image', 'failed', safeError) } });
     return { success: false, error: safeError };
   } finally {
@@ -1463,8 +1494,9 @@ async function runQwenVideoGenerate(
     );
 
     if ('error' in chainResult) {
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', status: 'failed', error: chainResult.error, attempted: chainResult.attempted, timestamp: Date.now(), ...taskMeta('video', 'failed', chainResult.error) } });
-      return { success: false, error: chainResult.error, attemptedModels: chainResult.attempted };
+      const safeError = redactModelNames(chainResult.error);
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', status: 'failed', error: safeError, attemptedCount: chainResult.attempted.length, timestamp: Date.now(), ...taskMeta('video', 'failed', safeError) } });
+      return { success: false, error: safeError, attemptedCount: chainResult.attempted.length };
     }
     // Final broadcast with the persistent (Firebase Storage) URL so the panel
     // can render/download the video even after the DashScope link expires.
@@ -1488,7 +1520,7 @@ async function runQwenVideoGenerate(
     });
     return result;
   } catch (err: any) {
-    const safeError = redactKey(err.message || String(err));
+    const safeError = safeErrorOf(err);
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', status: 'failed', error: safeError, timestamp: Date.now(), ...taskMeta('video', 'failed', safeError) } });
     return { success: false, error: safeError };
   }
@@ -1538,8 +1570,9 @@ export async function handleQwenTts(
     );
 
     if ('error' in chainResult) {
-      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', status: 'failed', error: chainResult.error, attempted: chainResult.attempted, timestamp: Date.now(), ...taskMeta('audio', 'failed', chainResult.error) } });
-      return { success: false, error: chainResult.error, attemptedModels: chainResult.attempted };
+      const safeError = redactModelNames(chainResult.error);
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', status: 'failed', error: safeError, attemptedCount: chainResult.attempted.length, timestamp: Date.now(), ...taskMeta('audio', 'failed', safeError) } });
+      return { success: false, error: safeError, attemptedCount: chainResult.attempted.length };
     }
 
     const res = chainResult.result;
@@ -1547,7 +1580,7 @@ export async function handleQwenTts(
     ctx.broadcast({ type: 'qwencloudUpdate', task: done });
     return res;
   } catch (err: any) {
-    const safeError = redactKey(err.message || String(err));
+    const safeError = safeErrorOf(err);
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', status: 'failed', error: safeError, timestamp: Date.now(), ...taskMeta('audio', 'failed', safeError) } });
     return { success: false, error: safeError };
   }

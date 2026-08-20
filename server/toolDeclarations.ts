@@ -141,12 +141,12 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenImageGenerate',
           description:
-            'Generate images with QwenCloud (qwen-image-2.0-pro on the international endpoint, falling back to z-image-turbo then Wan 2.7). ONLY use if the user explicitly asks to generate or create an image. This signals authorization.',
+            'Generate images with QwenCloud (qwen-image-2.0-pro-2026-06-22 on the international endpoint, falling back to qwen-image-2.0-pro then z-image-turbo then Wan 2.7). ONLY use if the user explicitly asks to generate or create an image. This signals authorization.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               prompt: { type: Type.STRING, description: 'Image description' },
-              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / wan2.6-t2i / qwen-image-3.0-pro / wan2.7-image-pro / wan2.7-image' },
+              model: { type: Type.STRING, description: 'qwen-image-2.0-pro-2026-06-22 (default) or qwen-image-2.0-pro / qwen-image-2.0 / z-image-turbo / wan2.6-t2i / qwen-image-3.0-pro / wan2.7-image-pro / wan2.7-image' },
               size: { type: Type.STRING, description: '1K, 2K, 4K, or width*height' },
               n: { type: Type.NUMBER, description: 'Number of images' },
               watermark: { type: Type.BOOLEAN, description: 'Add AI Generated watermark' },
@@ -159,13 +159,13 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenImageEdit',
           description:
-            'Edit images with QwenCloud (qwen-image-2.0-pro on the international endpoint, falling back to z-image-turbo then Wan 2.7) using text instructions and one or more source images. ONLY use if the user explicitly asks to edit an image.',
+            'Edit images with QwenCloud (qwen-image-2.0-pro-2026-06-22 on the international endpoint, falling back to qwen-image-2.0-pro then z-image-turbo then Wan 2.7) using text instructions and one or more source images. ONLY use if the user explicitly asks to edit an image.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               instruction: { type: Type.STRING, description: 'What to do with the images' },
               images: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Public image URLs, base64, or file paths' },
-              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / wan2.6-t2i / qwen-image-3.0-pro / wan2.7-image-pro / wan2.7-image' },
+              model: { type: Type.STRING, description: 'qwen-image-2.0-pro-2026-06-22 (default) or qwen-image-2.0-pro / qwen-image-2.0 / z-image-turbo / wan2.6-t2i / qwen-image-3.0-pro / wan2.7-image-pro / wan2.7-image' },
               size: { type: Type.STRING, description: '1K, 2K, or width*height' },
               n: { type: Type.NUMBER, description: 'Number of outputs' },
               watermark: { type: Type.BOOLEAN, description: 'Add watermark' },
