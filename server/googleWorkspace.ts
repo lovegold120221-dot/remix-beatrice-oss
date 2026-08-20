@@ -14,7 +14,11 @@
  */
 
 import { GoogleGenAI } from '@google/genai';
-import fs from 'fs';
+import {
+  readGoogleAuthRecord,
+  saveGoogleAuthRecord,
+  refreshGoogleAccessToken,
+} from './googleOAuth.js';
 
 export interface WorkspaceToolContext {
   ai?: GoogleGenAI;
@@ -33,51 +37,43 @@ const GOOGLE_NOT_CONNECTED =
 const GOOGLE_EXPIRED =
   'Your Google connection has expired or been revoked. Please reconnect from the profile menu (Sign in with Google) and try again.';
 
-const RTDB_URL =
-  process.env.FIREBASE_RTDB_URL ||
-  'https://beatrice-os-default-rtdb.europe-west1.firebasedatabase.app';
-
-let fbDb: any = null;
-let rtdbFailed = false;
-
-async function initRTDB(): Promise<any> {
-  if (fbDb) return fbDb;
-  if (rtdbFailed) return null;
-  const saPath =
-    process.env.FIREBASE_SERVICE_ACCOUNT ||
-    '/opt/beatrice-services/beatrice-os-service-account.json';
-  if (!fs.existsSync(saPath)) {
-    rtdbFailed = true;
-    return null;
-  }
-  try {
-    const appMod: any = await import('firebase-admin/app');
-    const dbMod: any = await import('firebase-admin/database');
-    if (!appMod.getApps?.().length) {
-      appMod.initializeApp({ credential: appMod.cert(saPath), databaseURL: RTDB_URL });
+// Resolve a usable Google access token for a user. Reads the stored record
+// (accessToken + refreshToken, written by the client and/or the server OAuth
+// flow in server/googleOAuth.ts) and, when the access token is expired and a
+// refresh token exists, silently renews it server-side and writes the fresh
+// token back to RTDB — so Beatrice's Google tools keep working without the
+// user re-consenting.
+async function resolveGoogleAccessToken(uid: string): Promise<string | null> {
+  const rec = await readGoogleAuthRecord(uid);
+  if (!rec?.accessToken) return null;
+  if (!isGoogleTokenExpired(rec.accessToken, rec.expiresAt)) return rec.accessToken;
+  if (rec.refreshToken) {
+    try {
+      const refreshed = await refreshGoogleAccessToken(rec.refreshToken);
+      if (refreshed?.accessToken) {
+        await saveGoogleAuthRecord(uid, {
+          accessToken: refreshed.accessToken,
+          expiresAt: Date.now() + refreshed.expiresIn * 1000,
+        });
+        return refreshed.accessToken;
+      }
+    } catch (err: any) {
+      console.error('[GoogleWorkspace] access token refresh failed:', err?.message || err);
     }
-    fbDb = dbMod.getDatabase();
-    return fbDb;
-  } catch (err: any) {
-    rtdbFailed = true;
-    console.error('[GoogleWorkspace] RTDB init failed:', err?.message || err);
-    return null;
   }
+  // Expired and no refresh token (or refresh failed) — return the stored token
+  // so requireGoogle() surfaces the "reconnect" message to the user.
+  return rec.accessToken;
 }
 
-async function readGoogleToken(uid: string): Promise<string | null> {
-  const safeUid = uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
-  if (!safeUid) return null;
-  const db = await initRTDB();
-  if (!db) return null;
-  try {
-    const snap = await db.ref(`google_tokens/${safeUid}`).get();
-    const val = snap?.val?.();
-    return typeof val?.accessToken === 'string' && val.accessToken ? val.accessToken : null;
-  } catch (err: any) {
-    console.error('[GoogleWorkspace] token read failed:', err?.message || err);
-    return null;
-  }
+// Whether a Google access token is expired: prefers the stored expiresAt
+// (server-written) and falls back to the JWT `exp` claim. Opaque tokens with
+// no expiry info are treated as usable (matches the previous behavior).
+function isGoogleTokenExpired(accessToken: string, expiresAt?: number): boolean {
+  if (expiresAt !== undefined) return Date.now() > expiresAt;
+  const payload = decodeJwtPayload(accessToken);
+  if (payload && typeof payload.exp === 'number') return payload.exp * 1000 < Date.now();
+  return false;
 }
 
 function decodeJwtPayload(token: string): Record<string, any> | null {
@@ -136,7 +132,7 @@ async function requireGoogle(ctx: WorkspaceToolContext, service: string): Promis
   if (!uid) {
     return { token: '', error: GOOGLE_NOT_CONNECTED, reason: 'not_connected' };
   }
-  const token = await readGoogleToken(uid);
+  const token = await resolveGoogleAccessToken(uid);
   if (!token) {
     return { token: '', error: GOOGLE_NOT_CONNECTED, reason: 'not_connected' };
   }

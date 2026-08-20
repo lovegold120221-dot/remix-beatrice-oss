@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   User as UserIcon,
   Mail,
@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Volume2,
   Clock,
+  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { SessionStatus, BeatriceConfig, voiceAlias } from '../types';
@@ -31,7 +32,17 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   config,
   transcriptsCount,
 }) => {
-  const { user, signInWithGoogle, logout } = useAuth();
+  const { user, signInWithGoogle, logout, connectGoogleServer } = useAuth();
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [googleDone, setGoogleDone] = useState(false);
+
+  const handleConnectGoogleServer = async () => {
+    setGoogleBusy(true);
+    setGoogleDone(false);
+    const ok = await connectGoogleServer();
+    setGoogleBusy(false);
+    setGoogleDone(ok);
+  };
 
   if (!isOpen) return null;
 
@@ -108,13 +119,28 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
           <div>
             {user ? (
-              <button
-                onClick={() => logout()}
-                className="w-full py-3 px-4 rounded-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center justify-center gap-2 font-semibold text-xs transition-all active:scale-95 cursor-pointer"
-              >
-                <LogOut className="w-4 h-4" />
-                Sign Out of Account
-              </button>
+              <div className="space-y-2">
+                <button
+                  onClick={handleConnectGoogleServer}
+                  disabled={googleBusy}
+                  className="w-full py-3 px-4 rounded-full bg-[#00f2fe]/10 hover:bg-[#00f2fe]/20 text-[#00f2fe] border border-[#00f2fe]/30 flex items-center justify-center gap-2 font-semibold text-xs transition-all active:scale-95 cursor-pointer disabled:opacity-60"
+                >
+                  <RefreshCw className={`w-4 h-4 ${googleBusy ? 'animate-spin' : ''}`} />
+                  {googleBusy ? 'Waiting for Google consent…' : 'Enable server-side Google refresh'}
+                </button>
+                {googleDone && (
+                  <p className="text-center text-[11px] text-emerald-400">
+                    Google connected — Beatrice can now renew access automatically.
+                  </p>
+                )}
+                <button
+                  onClick={() => logout()}
+                  className="w-full py-3 px-4 rounded-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center justify-center gap-2 font-semibold text-xs transition-all active:scale-95 cursor-pointer"
+                >
+                  <LogOut className="w-4 h-4" />
+                  Sign Out of Account
+                </button>
+              </div>
             ) : (
               <button onClick={() => signInWithGoogle()} className="b-btn-primary w-full flex items-center justify-center gap-2">
                 <LogIn className="w-4 h-4" />

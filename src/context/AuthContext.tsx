@@ -15,6 +15,36 @@ import { auth, googleProvider, db, GOOGLE_SCOPES, oAuthClientId } from '../lib/f
 import { ref, update, remove, get } from 'firebase/database';
 
 const TOKEN_STORAGE_KEY = 'beatrice_google_access_token';
+// Persistent "user has authenticated before" flag. It is set on every
+// successful sign-in/restore and cleared ONLY by the explicit logout button,
+// so transient Firebase session hiccups (token refresh failure, storage blip,
+// partition reset in embedded iframes) never bounce a signed-in user back to
+// the AuthPage.
+const AUTH_PERSISTED_KEY = 'beatrice_auth_persisted';
+
+function isAuthPersisted(): boolean {
+  try {
+    return localStorage.getItem(AUTH_PERSISTED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setAuthPersisted() {
+  try {
+    localStorage.setItem(AUTH_PERSISTED_KEY, '1');
+  } catch {
+    // ignore
+  }
+}
+
+function clearAuthPersisted() {
+  try {
+    localStorage.removeItem(AUTH_PERSISTED_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 // Renewal uses ONLY the Firebase-managed OAuth client (oAuthClientId): Firebase
 // auto-syncs its authorized JavaScript origins from the Firebase Auth
@@ -55,6 +85,7 @@ interface AuthContextType {
   signInWithEmail: (email: string, password: string) => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   logout: () => Promise<void>;
+  connectGoogleServer: () => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -68,6 +99,7 @@ const AuthContext = createContext<AuthContextType>({
   signInWithEmail: async () => {},
   resetPassword: async () => {},
   logout: async () => {},
+  connectGoogleServer: async () => false,
 });
 
 function loadPersistedToken(): string | null {
@@ -83,6 +115,21 @@ function clearPersistedToken() {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   } catch {
     // ignore
+  }
+}
+
+// Decode the expiry of a Google OAuth access token (JWT `exp`, seconds) as an
+// epoch-ms value, or null when the token is not a JWT. Used to decide when a
+// silent renewal is needed so the stored token never goes stale.
+function tokenExpiryMs(token: string | null): number | null {
+  if (!token) return null;
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
   }
 }
 
@@ -185,7 +232,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [accessToken, setAccessToken] = useState<string | null>(() => loadPersistedToken());
-  const [explicitlyAuthenticated, setExplicitlyAuthenticated] = useState<boolean>(false);
+  // Start from the persisted flag so a returning user's gate is open even
+  // before Firebase finishes restoring the session on boot — the AuthPage must
+  // never flash for someone who has already authenticated.
+  const [explicitlyAuthenticated, setExplicitlyAuthenticated] = useState<boolean>(() => isAuthPersisted());
   // True when the signed-in account was created in this session (fresh
   // registration) — used to route new users to the WhatsApp integration step.
   const [isNewUser, setIsNewUser] = useState<boolean>(false);
@@ -194,15 +244,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       if (!currentUser) {
-        setAccessToken(null);
-        clearPersistedToken();
-        setExplicitlyAuthenticated(false);
+        // Only an explicit logout() clears AUTH_PERSISTED_KEY. If the flag is
+        // still set, a transient Firebase session hiccup must NOT kick the
+        // user back to the AuthPage (the gate stays open; re-connecting will
+        // use whatever session Firebase can still produce).
+        if (!isAuthPersisted()) {
+          setAccessToken(null);
+          clearPersistedToken();
+          setExplicitlyAuthenticated(false);
+        }
         return;
       }
       // Auto-login returning users: a silently restored Firebase session
       // passes the gate instead of forcing the AuthPage again. The Google
       // access token is restored (localStorage → RTDB backup) and silently
       // renewed via GIS so workspace tools keep working on return visits.
+      setAuthPersisted();
       setExplicitlyAuthenticated(true);
       let token = loadPersistedToken();
       if (!token) {
@@ -221,6 +278,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         void persistAccessToken(renewed).catch(() => {
           // renewal already saved to localStorage; RTDB backup failure is non-fatal
         });
+      } else if (token) {
+        // No silent renewal available right now (offline, GIS blocked, …) —
+        // still re-sync the token we hold to RTDB so Beatrice can reuse it,
+        // keeping localStorage and google_tokens/{uid} aligned.
+        void persistAccessToken(token).catch(() => {
+          // RTDB backup failure is non-fatal; localStorage already has it
+        });
       }
     });
 
@@ -234,6 +298,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (credential?.accessToken) {
             await persistAccessToken(credential.accessToken);
           }
+          setAuthPersisted();
           setExplicitlyAuthenticated(true);
           const isFresh = result.user.metadata?.creationTime === result.user.metadata?.lastSignInTime;
           setIsNewUser(!!isFresh);
@@ -287,6 +352,79 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Keep the Google OAuth access token fresh in Firebase (google_tokens/{uid})
+  // so Beatrice can reuse it for Google services at any time: these tokens
+  // expire after ~1h and the server only reads the stored token (it holds no
+  // refresh token). While signed in, silently renew before expiry and re-store.
+  useEffect(() => {
+    if (!explicitlyAuthenticated) return;
+    const KEEP_FRESH_INTERVAL_MS = 30 * 60 * 1000; // check every 30 minutes
+    const RENEW_BEFORE_EXPIRY_MS = 15 * 60 * 1000; // renew when <15 min to expiry
+
+    const keepTokenFresh = async () => {
+      const current = loadPersistedToken();
+      const exp = tokenExpiryMs(current);
+      const nearExpiry = exp !== null && exp - Date.now() < RENEW_BEFORE_EXPIRY_MS;
+      if (!current || exp === null || nearExpiry) {
+        const renewed = await silentlyRenewGoogleToken();
+        if (renewed) {
+          await persistAccessToken(renewed);
+        }
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void keepTokenFresh().catch((err) => console.warn('Google token keep-fresh error:', err));
+    }, KEEP_FRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [explicitlyAuthenticated]);
+
+  // Run the server-side Google OAuth flow (popup) so the server stores a
+  // refresh token for this user and can renew expired access tokens on its
+  // own (see server/googleOAuth.ts). Resolves true once the server reports the
+  // refresh token is stored.
+  const connectGoogleServer = async (): Promise<boolean> => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) return false;
+      const res = await fetch('/api/google/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.url) {
+        console.warn('Google server connect failed:', data?.error || res.status);
+        return false;
+      }
+      const win = window.open(data.url, 'beatrice_google_connect', 'width=520,height=680,popup=yes');
+      if (!win) {
+        // Popup blocked — fall back to a full-page redirect; the OAuth
+        // callback lands back on the app with ?google=connected.
+        window.location.href = data.url;
+        return true;
+      }
+      // Poll until the server has stored the refresh token (user may take a
+      // while on Google's consent screen; cap at ~3 minutes).
+      const deadline = Date.now() + 3 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const statusRes = await fetch('/api/google/status', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const status = await statusRes.json().catch(() => ({}));
+          if (status?.serverRefresh) return true;
+        } catch {
+          // transient network error — keep polling
+        }
+      }
+      return false;
+    } catch (err) {
+      console.warn('Google server connect error:', err);
+      return false;
+    }
+  };
+
   const signInWithGoogle = async () => {
     try {
       let result: Awaited<ReturnType<typeof signInWithPopup>>;
@@ -305,6 +443,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const credential = GoogleAuthProvider.credentialFromResult(result);
       // Flip the gate immediately so the main page shows right away; the
       // token persistence runs in the background.
+      setAuthPersisted();
       setExplicitlyAuthenticated(true);
       // Fresh Google account (just created) → route to WhatsApp integration.
       const isFresh = result.user.metadata?.creationTime === result.user.metadata?.lastSignInTime;
@@ -323,6 +462,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = async () => {
     try {
       const uid = auth.currentUser?.uid || null;
+      // Clear the persisted flag FIRST: signOut() below triggers
+      // onAuthStateChanged(null), which must see the flag gone so the gate
+      // actually closes. The logout button is the ONLY place this clears.
+      clearAuthPersisted();
       await signOut(auth);
       setAccessToken(null);
       clearPersistedToken();
@@ -341,12 +484,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signUpWithEmail = async (email: string, password: string) => {
     await createUserWithEmailAndPassword(auth, email, password);
+    setAuthPersisted();
     setIsNewUser(true);
     setExplicitlyAuthenticated(true);
   };
 
   const signInWithEmail = async (email: string, password: string) => {
     await signInWithEmailAndPassword(auth, email, password);
+    setAuthPersisted();
     setExplicitlyAuthenticated(true);
   };
 
@@ -367,6 +512,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signInWithEmail,
         resetPassword,
         logout,
+        connectGoogleServer,
       }}
     >
       {children}

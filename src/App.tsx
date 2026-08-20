@@ -135,7 +135,16 @@ export default function App() {
       return false;
     }
   });
-  const [skipAuth, setSkipAuth] = useState<boolean>(false);
+  // Persisted across reloads: a guest who chose "Continue as guest" should
+  // stay in the app instead of being bounced back to the AuthPage on every
+  // refresh. Guests can still sign in from the Profile modal.
+  const [skipAuth, setSkipAuth] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('beatrice_skip_auth') === '1';
+    } catch {
+      return false;
+    }
+  });
   // WhatsApp integration step shown right after a NEW account is created.
   // Skipped once per session (or when the user links WhatsApp).
   const [waOnboardingDone, setWaOnboardingDone] = useState<boolean>(() => {
@@ -2124,7 +2133,18 @@ export default function App() {
 
       {/* Auth Gate Page — wait for auth init (e.g. redirect result resume) to
           avoid flashing the login page after Google grants permissions */}
-      {!showIntro && !authLoading && !gatePassed && <AuthPage onSkip={() => setSkipAuth(true)} />}
+      {!showIntro && !authLoading && !gatePassed && (
+        <AuthPage
+          onSkip={() => {
+            setSkipAuth(true);
+            try {
+              localStorage.setItem('beatrice_skip_auth', '1');
+            } catch {
+              // ignore
+            }
+          }}
+        />
+      )}
 
       {/* WhatsApp integration step — shown for any signed-in user whose
           WhatsApp is not yet linked (new registration or returning login) */}

@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { getDatabase } from 'firebase/database';
 import { getStorage, ref, uploadString, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -8,6 +8,15 @@ const app = initializeApp(firebaseConfig);
 export const db = getDatabase(app);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
+
+// Persist the Firebase session across page loads / tab restarts (localStorage)
+// so returning users are never logged out on refresh. Without this the SDK's
+// default can effectively fall back to session/memory persistence in some
+// flows (e.g. redirect sign-in inside embedded iframes), which drops the
+// session and sends users back to the AuthPage on every reload.
+setPersistence(auth, browserLocalPersistence).catch((err) =>
+  console.warn('Failed to set Firebase auth persistence to localStorage:', err)
+);
 export const googleProvider = new GoogleAuthProvider();
 
 // Always show the Google consent screen and request Google services

@@ -97,6 +97,16 @@ import {
   handleConnectGoogleAccount,
 } from './server/googleWorkspace.js';
 import {
+  GOOGLE_OAUTH_SCOPES,
+  buildGoogleAuthUrl,
+  consumeConnectNonce,
+  createConnectNonce,
+  exchangeGoogleCode,
+  getGoogleOAuthConfig,
+  readGoogleAuthRecord,
+  saveGoogleAuthRecord,
+} from './server/googleOAuth.js';
+import {
   handleResolveWhatsAppContact,
   handleRequestWhatsAppSend,
   handleSendWhatsAppText,
@@ -275,7 +285,14 @@ async function startServer() {
   // attach auth headers). Everything else — tool execution, Google Workspace,
   // WhatsApp lifecycle — requires a verified Firebase ID token.
   app.use('/api', (req, res, next) => {
-    if (req.path === '/health' || req.path === '/terminal/info' || req.path.startsWith('/sandbox/preview')) {
+    // /api/google/callback is hit by Google's OAuth redirect (no Firebase
+    // token possible); it resolves the user via the single-use nonce in state.
+    if (
+      req.path === '/health' ||
+      req.path === '/terminal/info' ||
+      req.path === '/google/callback' ||
+      req.path.startsWith('/sandbox/preview')
+    ) {
       return next();
     }
     return requireAuth(req, res, next);
@@ -503,6 +520,83 @@ async function startServer() {
         { broadcast: () => {}, uid: res.locals?.authUser?.uid }
       );
       res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Server-side Google OAuth (refresh-token renewal) ──────────────────────
+  // The client stores Google access tokens (RTDB google_tokens/{uid}), but
+  // they expire after ~1h and Firebase gives the browser no Google refresh
+  // token. These routes run the server's own OAuth2 web flow so a refresh
+  // token is stored per user; server/googleWorkspace.ts then renews expired
+  // access tokens server-side on demand. Requires GOOGLE_CLIENT_ID/SECRET (or
+  // google-web-credentials.json) and a registered redirect URI.
+  app.post('/api/google/connect', async (req, res) => {
+    try {
+      const uid = res.locals?.authUser?.uid;
+      if (!uid) return res.status(401).json({ error: 'Not authenticated' });
+      if (!getGoogleOAuthConfig()) {
+        return res.status(500).json({
+          error: 'Google OAuth is not configured on the server (missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET or google-web-credentials.json).',
+        });
+      }
+      const nonce = createConnectNonce(uid);
+      const url = buildGoogleAuthUrl(nonce, GOOGLE_OAUTH_SCOPES);
+      res.json({ ok: true, url });
+    } catch (err: any) {
+      logger.error({ err: String(err?.message || err) }, 'google connect error');
+      res.status(500).json({ error: err?.message || 'Failed to start Google connect.' });
+    }
+  });
+
+  // Public: Google redirects here after consent. The user is resolved via the
+  // single-use nonce in `state` (minted by /api/google/connect for the
+  // authenticated caller), so tokens can only be stored for the user who
+  // actually initiated the flow.
+  app.get('/api/google/callback', async (req, res) => {
+    const appUrl = process.env.APP_URL || `http://localhost:${process.env.PORT || 5555}`;
+    const { code, state, error } = req.query as Record<string, string | undefined>;
+    if (error) {
+      logger.warn({ error }, 'google oauth callback error');
+      return res.redirect(`${appUrl}/?google=error`);
+    }
+    if (!code || !state) {
+      return res.status(400).send('Missing code or state.');
+    }
+    const uid = consumeConnectNonce(state);
+    if (!uid) {
+      return res.status(400).send('Invalid or expired OAuth state. Please try connecting again.');
+    }
+    const cfg = getGoogleOAuthConfig();
+    if (!cfg) {
+      return res.status(500).send('Google OAuth is not configured on the server.');
+    }
+    try {
+      const tok = await exchangeGoogleCode(code, cfg.redirectUri);
+      if (!tok.accessToken) throw new Error('No access token returned');
+      await saveGoogleAuthRecord(uid, {
+        accessToken: tok.accessToken,
+        refreshToken: tok.refreshToken,
+        expiresAt: Date.now() + tok.expiresIn * 1000,
+      });
+      logger.info({ uid: uid.slice(0, 8), hasRefresh: !!tok.refreshToken }, 'google oauth connected');
+      res.redirect(`${appUrl}/?google=connected`);
+    } catch (err: any) {
+      logger.error({ err: String(err?.message || err) }, 'google oauth exchange error');
+      res.redirect(`${appUrl}/?google=error`);
+    }
+  });
+
+  app.get('/api/google/status', async (req, res) => {
+    try {
+      const uid = res.locals?.authUser?.uid;
+      if (!uid) return res.json({ connected: false, serverRefresh: false });
+      const rec = await readGoogleAuthRecord(uid);
+      res.json({
+        connected: !!(rec?.accessToken || rec?.refreshToken),
+        serverRefresh: !!rec?.refreshToken,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
