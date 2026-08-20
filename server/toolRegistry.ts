@@ -76,6 +76,12 @@ import {
 } from './whatsapp-tools.js';
 import { logger } from './logger.js';
 import { incCounter, observeHistogram } from './metrics.js';
+import {
+  cacheCoreMemory,
+  fallbackCoreRead,
+  fallbackRecall,
+  fallbackRemember,
+} from './memoryFallback.js';
 
 export type ToolHandler = (args: any, ctx: ToolContext) => Promise<unknown> | unknown;
 
@@ -127,58 +133,73 @@ export async function dispatchTool(
 
 // ---- MemoryCore gateway handlers (moved out of server.ts) ----
 
-async function fetchMemoryAdd(body: any, _ctx: ToolContext): Promise<any> {
-  const apiKey = process.env.TDAI_LLM_API_KEY || 'beatrice-llm-proxy';
-  const serviceId = process.env.TDAI_LLM_SERVICE_ID || 'beatrice-memory';
-  const payload = { session_id: body?.session_id, messages: body?.messages };
-  const res = await fetch('http://127.0.0.1:8420/v2/conversation/add', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'x-tdai-service-id': serviceId,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
-  return { ok: true, data };
+interface GatewayResult {
+  ok: boolean;
+  reachable: boolean;
+  error?: string;
+  data?: any;
 }
 
-async function fetchMemorySearch(body: any, _ctx: ToolContext): Promise<any> {
+async function callMemoryGateway(endpoint: string, payload: any, timeoutMs = 2000): Promise<GatewayResult> {
   const apiKey = process.env.TDAI_LLM_API_KEY || 'beatrice-llm-proxy';
   const serviceId = process.env.TDAI_LLM_SERVICE_ID || 'beatrice-memory';
-  const payload = { query: body?.query, limit: body?.limit ?? 5, session_id: body?.session_id };
-  const res = await fetch('http://127.0.0.1:8420/v2/conversation/search', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'x-tdai-service-id': serviceId,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
-  return { ok: true, data };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://127.0.0.1:8420${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'x-tdai-service-id': serviceId,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, reachable: true, error: data?.error?.message || `HTTP ${res.status}` };
+    return { ok: true, reachable: true, data };
+  } catch (err: any) {
+    return {
+      ok: false,
+      reachable: false,
+      error: err?.name === 'AbortError' ? 'memory gateway timeout' : err?.message || String(err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-async function fetchCoreRead(body: any, _ctx: ToolContext): Promise<any> {
-  const apiKey = process.env.TDAI_LLM_API_KEY || 'beatrice-llm-proxy';
-  const serviceId = process.env.TDAI_LLM_SERVICE_ID || 'beatrice-memory';
-  const payload = { version: body?.version };
-  const res = await fetch('http://127.0.0.1:8420/v2/core/read', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'x-tdai-service-id': serviceId,
-    },
-    body: JSON.stringify(payload),
+async function handleRememberMemory(args: any, _ctx: ToolContext): Promise<unknown> {
+  const session_id = args?.session_id;
+  const messages = args?.messages;
+  const gateway = await callMemoryGateway('/v2/conversation/add', { session_id, messages });
+  if (gateway.ok) return { ok: true, data: gateway.data };
+  logger.warn({ error: gateway.error, reachable: gateway.reachable }, 'memory gateway unavailable; using local fallback');
+  const id = fallbackRemember(session_id, messages);
+  return { ok: true, source: 'local-fallback', data: { id, stored: true, gatewayError: gateway.error } };
+}
+
+async function handleRecallMemory(args: any, _ctx: ToolContext): Promise<unknown> {
+  const gateway = await callMemoryGateway('/v2/conversation/search', {
+    query: args?.query,
+    limit: args?.limit ?? 5,
+    session_id: args?.session_id,
   });
-  const data = await res.json();
-  if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
-  return { ok: true, data };
+  if (gateway.ok) return { ok: true, data: gateway.data };
+  logger.warn({ error: gateway.error, reachable: gateway.reachable }, 'memory gateway unavailable; using local fallback');
+  const results = fallbackRecall(args?.query, args?.limit ?? 5, args?.session_id);
+  return { ok: true, source: 'local-fallback', data: { results, gatewayError: gateway.error } };
+}
+
+async function handleGetCoreMemory(args: any, _ctx: ToolContext): Promise<unknown> {
+  const gateway = await callMemoryGateway('/v2/core/read', { version: args?.version });
+  if (gateway.ok) {
+    if (!args?.version) cacheCoreMemory(gateway.data);
+    return { ok: true, data: gateway.data };
+  }
+  logger.warn({ error: gateway.error, reachable: gateway.reachable }, 'memory gateway unavailable; using cached core memory');
+  return { ok: true, source: 'local-fallback', data: fallbackCoreRead() };
 }
 
 // ---- Registration (single source of truth for dispatch) ----
@@ -261,7 +282,7 @@ export function registerAllTools(): void {
   registerTool('whatsapp_call', handleWhatsAppCall);
 
   // Memory
-  registerTool('remember_memory', fetchMemoryAdd);
-  registerTool('recall_memory', fetchMemorySearch);
-  registerTool('get_core_memory', fetchCoreRead);
+  registerTool('remember_memory', handleRememberMemory);
+  registerTool('recall_memory', handleRecallMemory);
+  registerTool('get_core_memory', handleGetCoreMemory);
 }
