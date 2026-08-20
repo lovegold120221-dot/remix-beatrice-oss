@@ -43,9 +43,11 @@ const DASHSCOPE_INTL_BASE = 'https://dashscope-intl.aliyuncs.com/api/v1';
 // endpoint; the qwen-image-3.0-pro / wan2.7-image models run on Token Plan.
 const INTEL_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'wan2.6-t2i'];
 const QWEN_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'wan2.6-t2i', 'qwen-image-3.0-pro', 'wan2.7-image-pro', 'wan2.7-image'];
-// Video models rotate from most capable to fallback. wan3.0-video runs on the
-// international endpoint (async submit + task poll); the happyhorse models run on Token Plan.
-const QWEN_VIDEO_MODELS = ['wan3.0-video', 'happyhorse-1.1-t2v'];
+// Video models rotate from most capable to fallback. happyhorse-1.1-t2v and
+// wan3.0-video both run on the international endpoint (async submit + task
+// poll); wan3.0-video is currently stuck PENDING intl-side, so happyhorse is
+// primary. No video models run on Token Plan anymore.
+const QWEN_VIDEO_MODELS = ['happyhorse-1.1-t2v', 'wan3.0-video'];
 const QWEN_TTS_MODELS = ['qwen-audio-3.0-tts-plus'];
 
 // Key used for Token Plan host calls (video/TTS/chat/status pings). The legacy
@@ -58,9 +60,9 @@ function imageEndpointFor(model: string): { base: string; key: string } {
   return { base: DASHSCOPE_BASE, key: TOKEN_PLAN_KEY };
 }
 
-// Base endpoint + auth key for a given video model (wan3.0-video is intl-only).
+// Base endpoint + auth key for a given video model (happyhorse and wan3.0 are intl-only).
 function videoEndpointFor(model: string): { base: string; key: string } {
-  if (model.startsWith('wan3.0')) return { base: DASHSCOPE_INTL_BASE, key: DASHSCOPE_API_KEY };
+  if (model.startsWith('wan3.0') || model.startsWith('happyhorse')) return { base: DASHSCOPE_INTL_BASE, key: DASHSCOPE_API_KEY };
   return { base: DASHSCOPE_BASE, key: TOKEN_PLAN_KEY };
 }
 

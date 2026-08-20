@@ -187,12 +187,12 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenVideoGenerate',
           description:
-            'Generate premium AI videos with QwenCloud. Models: wan3.0-video (international endpoint, preferred), falling back to happyhorse-1.1-t2v. ONLY use if the user explicitly asks to generate or create a video.',
+            'Generate premium AI videos with QwenCloud. Models: happyhorse-1.1-t2v (international endpoint, default), falling back to wan3.0-video. ONLY use if the user explicitly asks to generate or create a video.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               prompt: { type: Type.STRING, description: 'Video description with optional shot timestamps' },
-              model: { type: Type.STRING, description: 'Optional: wan3.0-video (default) or happyhorse-1.1-t2v' },
+              model: { type: Type.STRING, description: 'Optional: happyhorse-1.1-t2v (default) or wan3.0-video' },
               resolution: { type: Type.STRING, description: '480P, 720P or 1080P' },
               ratio: { type: Type.STRING, description: '16:9, 9:16, or 1:1' },
               duration: { type: Type.NUMBER, description: 'Duration in seconds (model-dependent, typically 2-15s)' },
@@ -221,7 +221,7 @@ export function getFunctionDeclarations() {
         {
           name: 'generateVideo',
           description:
-            'Generate a short AI video clip from a text prompt using DashScope. Models: wan3.0-video (preferred) with happyhorse-1.1-t2v fallback. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
+            'Generate a short AI video clip from a text prompt using DashScope. Models: happyhorse-1.1-t2v (default) with wan3.0-video fallback. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
           parameters: {
             type: Type.OBJECT,
             properties: {

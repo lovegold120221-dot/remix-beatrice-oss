@@ -35,7 +35,7 @@ Every capability below is a real, working tool registered in the server's functi
 
 ### Creative Media (paid APIs already configured — used only on explicit request)
 - **Images** — `qwenImageGenerate` / `qwenImageEdit` (QwenCloud Wan 2.7, up to 4K, watermark option)
-- **Video** — `qwenVideoGenerate` (wan3.0-video, 720P/1080P, 2–15s, optional lip-sync audio) and `generateVideo` (DashScope wan3.0-video clips)
+- **Video** — `qwenVideoGenerate` (happyhorse-1.1-t2v, 720P/1080P, 2–15s, optional lip-sync audio) and `generateVideo` (DashScope happyhorse-1.1-t2v clips)
 - **Speech** — `qwenTts` (qwen3-tts-flash, multiple voices/languages)
 - **Chat** — `qwenChat` (QwenCloud qwen3.8-max / 3.7-plus / 3.7-flash)
 
