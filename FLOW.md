@@ -144,7 +144,7 @@ flowchart TD
     S2 --> T[liveSession.sendToolResponse<br/>Gemini turns result into speech]
 ```
 
-Declarations live in `server/toolDeclarations.ts` (moved out of server.ts). Boot-time `validateToolCoverage()` and `validateSkillCoverage()` fail fast if the declarations, the catalog (`server/toolCatalog.ts`), the registry, or the skill routes drift out of sync. Media tools hit two DashScope hosts with per-model routing (`imageEndpointFor()`/`videoEndpointFor()` in `server/tools.ts`): image `qwen-image-2.0-pro` → `z-image-turbo` (intl) → `wan2.7-image-pro`/`wan2.7-image` (Token Plan); video `happyhorse-1.1-t2v` (intl) → `wan3.0-video` (intl); TTS `qwen-audio-3.0-tts-plus` (Token Plan).
+Declarations live in `server/toolDeclarations.ts` (moved out of server.ts). Boot-time `validateToolCoverage()` and `validateSkillCoverage()` fail fast if the declarations, the catalog (`server/toolCatalog.ts`), the registry, or the skill routes drift out of sync. Media tools hit two DashScope hosts with per-model routing (`imageEndpointFor()`/`videoEndpointFor()` in `server/tools.ts`): image `qwen-image-2.0-pro` → `z-image-turbo` → `wan2.6-t2i` (intl) → `qwen-image-3.0-pro` → `wan2.7-image-pro`/`wan2.7-image` (Token Plan); video `happyhorse-1.1-t2v` → `wan3.0-video` (both intl; wan3.0 currently stuck PENDING intl-side); TTS `qwen-audio-3.0-tts-plus` (Token Plan).
 
 ## 4. Memory learning flow (MemoryCore, with local fallback)
 
@@ -253,7 +253,50 @@ sequenceDiagram
 
 Video generation (`generateVideo` / `qwenVideoGenerate`) is enqueued in a per-user FIFO queue (`server/tools.ts`): one render runs server-wide at a time, each user may hold at most one running + one queued job, and queued jobs broadcast a `queued` status with their position. Memory tool results are returned with `source: 'local-fallback'` when the MemoryCore gateway is unreachable.
 
-## 9. Manual tool triggers (no voice)
+## 9. Media generation flow (DashScope dual-host routing)
+
+Media tools only run when the user explicitly asks (see `MEDIA_GENERATION.md`). Requests hit the tool handlers directly (synchronous) or the per-user FIFO video queue (background render + broadcasts):
+
+```mermaid
+flowchart TD
+    U[Boss explicitly asks for image / video / speech] --> G{media tool?}
+    G -->|qwenImageGenerate / qwenImageEdit| IMG[tryModelChain over image rotation]
+    G -->|qwenVideoGenerate / generateVideo| VID[enqueue per-user FIFO queue<br/>one render server-wide, 1 running + 1 queued per user]
+    G -->|qwenTts| TTS[tryModelChain: qwen-audio-3.0-tts-plus]
+
+    IMG --> IE{imageEndpointFor model}
+    IE -->|qwen-image-2.0-pro, z-image-turbo, wan2.6-t2i| IINTL[dashscope-intl + sk-ws- key<br/>synchronous multimodal-generation]
+    IE -->|qwen-image-3.0-pro, wan2.7-image-pro, wan2.7-image| ITP[token-plan + sk-sp- key<br/>quota exhausted until 08-25]
+    IINTL --> IFB1[Firebase Storage upload]
+    ITP --> IFB1
+    IFB1 --> IB[qwencloudUpdate completed broadcast<br/>urls + firebaseUrls -> SPA]
+
+    VID --> RW[runGenerateVideo / runQwenVideoGenerate]
+    RW --> VE{videoEndpointFor model}
+    VE -->|happyhorse-1.1-t2v default| VINTL[dashscope-intl + sk-ws- key<br/>async submit X-DashScope-Async: enable]
+    VE -->|wan3.0-video fallback| VINTL2[dashscope-intl<br/>currently stuck PENDING intl-side]
+    VE -->|other| VTP[token-plan + sk-sp- key]
+    VINTL --> SUB[task_id PENDING]
+    VINTL2 --> SUB
+    VTP --> SUB
+    SUB --> POLL[poll /tasks/{id} every 5s<br/>status pings ~15s to keep convo alive]
+    POLL -->|SUCCEEDED| VURL[video_url]
+    POLL -->|FAILED| NXT[try next model in rotation]
+    NXT --> RW
+    VURL --> VFB[Firebase Storage upload<br/>persistent downloadUrl - DashScope URLs expire]
+    VFB --> VB[videoGenerationUpdate / qwencloudUpdate<br/>completed broadcast -> SPA]
+
+    TTS --> TT[token-plan + sk-sp- key<br/>multimodal-generation audio.url]
+    TT --> TA[qwencloudUpdate audio broadcast]
+```
+
+Key points:
+- Two host/key pairs: Pay-As-You-Go (`sk-ws-*` → `dashscope-intl.aliyuncs.com`) and Token Plan (`sk-sp-*` → `token-plan.ap-southeast-1.maas.aliyuncs.com`); `TOKEN_PLAN_KEY = DASHSCOPE_LEGACY_API_KEY || DASHSCOPE_API_KEY`.
+- Images are synchronous `multimodal-generation` (response shape `choices[].message.content[].image`); videos are async submit + poll (60 × 5s cap); TTS returns `output.audio.url`.
+- All finished media is re-uploaded to Firebase Storage because DashScope URLs expire (~24h).
+- `wan3.0-video` submits fine but tasks stay PENDING intl-side, so `happyhorse-1.1-t2v` is primary (renders in ~100s, verified).
+
+## 10. Manual tool triggers (no voice)
 
 ```mermaid
 flowchart TD
@@ -286,7 +329,7 @@ flowchart TD
 
 Each manual trigger reuses the exact same handler as the voice path, so state is identical regardless of entry point.
 
-## 10. Deployment flow (build → serve → proxy)
+## 11. Deployment flow (build → serve → proxy)
 
 ```mermaid
 flowchart TD

@@ -34,9 +34,9 @@ Every capability below is a real, working tool registered in the server's functi
 - **runComputerControl** — desktop control of the server machine (shell, apps, mouse, keys)
 
 ### Creative Media (paid APIs already configured — used only on explicit request)
-- **Images** — `qwenImageGenerate` / `qwenImageEdit` (QwenCloud Wan 2.7, up to 4K, watermark option)
-- **Video** — `qwenVideoGenerate` (happyhorse-1.1-t2v, 720P/1080P, 2–15s, optional lip-sync audio) and `generateVideo` (DashScope happyhorse-1.1-t2v clips)
-- **Speech** — `qwenTts` (qwen3-tts-flash, multiple voices/languages)
+- **Images** — `qwenImageGenerate` / `qwenImageEdit` (QwenCloud: `qwen-image-2.0-pro` → `z-image-turbo` → `wan2.6-t2i` on the intl endpoint, `qwen-image-3.0-pro` / Wan 2.7 on Token Plan; up to 4K, watermark option)
+- **Video** — `qwenVideoGenerate` / `generateVideo` (`happyhorse-1.1-t2v` on the intl endpoint, 720P/1080P, 2–15s, optional lip-sync audio; `wan3.0-video` fallback)
+- **Speech** — `qwenTts` (qwen-audio-3.0-tts-plus, multiple voices/languages)
 - **Chat** — `qwenChat` (QwenCloud qwen3.8-max / 3.7-plus / 3.7-flash)
 
 ### Presentation
