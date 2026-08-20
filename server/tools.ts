@@ -704,21 +704,56 @@ export async function handleRunComputerControl(
   }
 }
 
-// ---- Video generation concurrency guard ----
-// Only ONE video generation (qwenVideoGenerate OR generateVideo) may run at a
-// time; concurrent calls are rejected with a clear error so a single request
-// can never stack multiple render jobs. Generations run in the background so
-// the Live conversation keeps flowing while the task panel shows progress.
-let videoGenerationActive = false;
-
-function tryAcquireVideoGeneration(): boolean {
-  if (videoGenerationActive) return false;
-  videoGenerationActive = true;
-  return true;
+// ---- Video generation queue ----
+// One video generation (qwenVideoGenerate OR generateVideo) renders at a time
+// server-wide (Token Plan constraint), but requests from different users queue
+// up FIFO instead of being rejected, and a single user may hold at most one
+// running + one queued job so nobody can monopolize the queue. Generations run
+// in the background so the Live conversation keeps flowing.
+interface VideoQueueItem {
+  userId: string;
+  run: () => Promise<void>;
 }
 
-function releaseVideoGeneration() {
-  videoGenerationActive = false;
+const videoQueue: VideoQueueItem[] = [];
+let videoQueueRunning = false;
+const videoActiveByUser = new Map<string, number>();
+
+export function enqueueVideoGeneration(userId: string, run: () => Promise<void>): { accepted: boolean; position?: number; reason?: string } {
+  const active = videoActiveByUser.get(userId) || 0;
+  if (active >= 2) {
+    return {
+      accepted: false,
+      reason: `You already have ${active} video generation${active > 1 ? 's' : ''} in progress — wait for one to finish before starting another.`,
+    };
+  }
+  videoActiveByUser.set(userId, active + 1);
+  videoQueue.push({ userId, run });
+  const position = videoQueue.length;
+  void pumpVideoQueue();
+  return { accepted: true, position };
+}
+
+async function pumpVideoQueue() {
+  if (videoQueueRunning) return;
+  videoQueueRunning = true;
+  while (videoQueue.length > 0) {
+    const item = videoQueue.shift()!;
+    try {
+      await item.run();
+    } catch (err: any) {
+      console.error('video queue job failed:', err?.message || err);
+    } finally {
+      const count = (videoActiveByUser.get(item.userId) || 1) - 1;
+      if (count <= 0) videoActiveByUser.delete(item.userId);
+      else videoActiveByUser.set(item.userId, count);
+    }
+  }
+  videoQueueRunning = false;
+}
+
+export function videoQueueStats(): { queueLength: number; running: boolean; activeUsers: string[] } {
+  return { queueLength: videoQueue.length, running: videoQueueRunning, activeUsers: [...videoActiveByUser.keys()] };
 }
 
 export async function handleGenerateVideo(
@@ -737,21 +772,35 @@ export async function handleGenerateVideo(
   if (!apiKey) {
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
-  if (!tryAcquireVideoGeneration()) {
-    return {
-      success: false,
-      error: 'Another video generation is already in progress — wait for it to finish before starting a new one.',
-    };
-  }
   const taskId = `vid_${Date.now()}`;
-  // Render in the background (non-blocking) so Beatrice stays conversational;
-  // progress and the final video arrive via videoGenerationUpdate broadcasts.
-  void runGenerateVideo(args, ctx, taskId, apiKey).finally(releaseVideoGeneration);
+  const queued = enqueueVideoGeneration(ctx.uid || 'shared', async () => {
+    await runGenerateVideo(args, ctx, taskId, apiKey);
+  });
+  if (!queued.accepted) {
+    return { success: false, error: queued.reason };
+  }
+  if (queued.position && queued.position > 1) {
+    ctx.broadcast({
+      type: 'videoGenerationUpdate',
+      task: {
+        id: taskId,
+        prompt: args.prompt,
+        status: 'queued',
+        progress: 2,
+        position: queued.position,
+        timestamp: Date.now(),
+        ...taskMeta('video', 'queued'),
+      },
+    });
+  }
   return {
     success: true,
     taskId,
     status: 'started',
-    message: 'Video generation started in the background. I will keep chatting while it renders — watch the Video Generation panel for progress.',
+    position: queued.position,
+    message: queued.position && queued.position > 1
+      ? `Video generation queued at position ${queued.position}. I will keep chatting while it renders — watch the Video Generation panel for progress.`
+      : 'Video generation started in the background. I will keep chatting while it renders — watch the Video Generation panel for progress.',
   };
 }
 
@@ -1247,21 +1296,36 @@ export async function handleQwenVideoGenerate(
   if (!DASHSCOPE_API_KEY) {
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
-  if (!tryAcquireVideoGeneration()) {
-    return {
-      success: false,
-      error: 'Another video generation is already in progress — wait for it to finish before starting a new one.',
-    };
-  }
   const taskId = `qwen_vid_${Date.now()}`;
-  // Render in the background (non-blocking) so Beatrice stays conversational;
-  // progress and the final video arrive via qwencloudUpdate broadcasts.
-  void runQwenVideoGenerate(args, ctx, taskId).finally(releaseVideoGeneration);
+  const queued = enqueueVideoGeneration(ctx.uid || 'shared', async () => {
+    await runQwenVideoGenerate(args, ctx, taskId);
+  });
+  if (!queued.accepted) {
+    return { success: false, error: queued.reason };
+  }
+  if (queued.position && queued.position > 1) {
+    ctx.broadcast({
+      type: 'qwencloudUpdate',
+      task: {
+        id: taskId,
+        kind: 'video',
+        prompt: args.prompt,
+        status: 'queued',
+        progress: 2,
+        position: queued.position,
+        timestamp: Date.now(),
+        ...taskMeta('video', 'queued'),
+      },
+    });
+  }
   return {
     success: true,
     taskId,
     status: 'started',
-    message: 'Video generation started in the background. I will keep chatting while it renders — watch the Media panel for progress.',
+    position: queued.position,
+    message: queued.position && queued.position > 1
+      ? `Video generation queued at position ${queued.position}. I will keep chatting while it renders — watch the Media panel for progress.`
+      : 'Video generation started in the background. I will keep chatting while it renders — watch the Media panel for progress.',
   };
 }
 
