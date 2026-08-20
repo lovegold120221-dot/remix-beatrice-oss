@@ -20,6 +20,11 @@ import { requireAuth, verifyIdToken, authEnabled } from './server/auth.js';
 import { registerAllTools, dispatchTool } from './server/toolRegistry.js';
 import { getFunctionDeclarations, validateToolCoverage } from './server/toolDeclarations.js';
 import { handleFunctionCallWithSkills } from './server/toolRoutingMiddleware.js';
+import {
+  tryAcquireGenerationSlot,
+  releaseGenerationSlot,
+  generationBusyMessage,
+} from './server/taskGate.js';
 import { createConversationContext, updateContextFromToolCall, updateContextFromSkillSelection } from './server/conversationContext.js';
 import type { ActiveContext } from './server/skills/types.js';
 import {
@@ -1295,7 +1300,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
           broadcastToClient({ type: 'toolCall', id: callId, name: 'deployAgentTask', args: { agentName: msg.agentName, task: msg.task } });
           const res = await handleDeployAgentTask(
             { agentName: msg.agentName || 'Sub-Agent', task: msg.task },
-            { ai, broadcast: broadcastToClient }
+            { ai, broadcast: broadcastToClient, uid: sessionBootstrap?.uid }
           );
           broadcastToClient({ type: 'toolResult', id: callId, name: 'deployAgentTask', result: res });
         } else if (msg.type === 'getSystemInfo') {
@@ -1338,22 +1343,61 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
           await sendToService('computer', { type: msg.action, sessionId, ...msg.payload }, broadcastToClient);
         } else if (msg.type === 'runCodingAgent') {
           const sessionId = msg.sessionId || `ca_${Date.now()}`;
-          broadcastToClient({
-            type: 'codingAgentUpdate',
-            session: {
-              id: sessionId,
-              task: msg.task,
-              cwd: msg.cwd || process.cwd(),
-              status: 'starting',
-              log: [
-                `[${new Date().toLocaleTimeString()}] Coding Agent initializing...`,
-                `[${new Date().toLocaleTimeString()}] Task: ${msg.task}`,
-              ],
-              output: '',
-              timestamp: Date.now(),
-            },
-          });
-          await sendToService('codingAgent', { type: 'runCodingAgent', sessionId, task: msg.task, cwd: msg.cwd }, broadcastToClient);
+          const manualUid = sessionBootstrap?.uid || 'shared';
+          // One generation task at a time per user — reject a second coding
+          // agent while any other task is still running.
+          const slot = tryAcquireGenerationSlot(manualUid, 'code', sessionId);
+          if (slot.ok === false) {
+            broadcastToClient({
+              type: 'toolResult',
+              id: 'manual_ca_' + Date.now(),
+              name: 'runCodingAgent',
+              result: { success: false, error: generationBusyMessage(slot.busy.kind) },
+            });
+          } else {
+            broadcastToClient({
+              type: 'codingAgentUpdate',
+              session: {
+                id: sessionId,
+                task: msg.task,
+                cwd: msg.cwd || process.cwd(),
+                status: 'starting',
+                log: [
+                  `[${new Date().toLocaleTimeString()}] Coding Agent initializing...`,
+                  `[${new Date().toLocaleTimeString()}] Task: ${msg.task}`,
+                ],
+                output: '',
+                timestamp: Date.now(),
+              },
+            });
+            try {
+              const ws = await sendToService('codingAgent', { type: 'runCodingAgent', sessionId, task: msg.task, cwd: msg.cwd }, broadcastToClient);
+              // Hold the slot until the service reports a terminal state for
+              // this session (or the link dies) so nothing else can start.
+              const release = () => releaseGenerationSlot(manualUid, sessionId);
+              ws.on('message', (data) => {
+                try {
+                  const parsed = JSON.parse(data.toString());
+                  const s = parsed?.session;
+                  if (
+                    parsed?.type === 'codingAgentUpdate' &&
+                    s &&
+                    s.id === sessionId &&
+                    ['completed', 'failed', 'cancelled'].includes(s.status)
+                  ) {
+                    release();
+                  }
+                } catch {
+                  // ignore non-json
+                }
+              });
+              ws.on('close', release);
+              ws.on('error', release);
+            } catch (err: any) {
+              console.error('Error starting coding agent:', err?.message || err);
+              releaseGenerationSlot(manualUid, sessionId);
+            }
+          }
         } else if (msg.type === 'generateVideo') {
           // Manual video generation from the Tools workbench. The handler
           // broadcasts progress in the background; if it fails before any
@@ -1363,7 +1407,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
           broadcastToClient({ type: 'toolCall', id: callId, name: 'generateVideo', args: { prompt: msg.prompt } });
           const res: any = await handleGenerateVideo(
             { prompt: msg.prompt, size: msg.resolution || msg.size, duration: msg.duration },
-            { ai, broadcast: broadcastToClient }
+            { ai, broadcast: broadcastToClient, uid: sessionBootstrap?.uid }
           );
           if (res?.error && !res?.taskId) {
             broadcastToClient({
@@ -1395,11 +1439,11 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
             msg.type === 'qwenImageEdit'
               ? await handleQwenImageEdit(
                   { instruction: msg.instruction, images: msg.images, size: msg.size, watermark: msg.watermark },
-                  { ai, broadcast: broadcastToClient }
+                  { ai, broadcast: broadcastToClient, uid: sessionBootstrap?.uid }
                 )
               : await handleQwenImageGenerate(
                   { prompt: msg.prompt, size: msg.size, watermark: msg.watermark },
-                  { ai, broadcast: broadcastToClient }
+                  { ai, broadcast: broadcastToClient, uid: sessionBootstrap?.uid }
                 );
           if (res?.error) {
             broadcastToClient({
@@ -1421,7 +1465,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
           broadcastToClient({ type: 'toolCall', id: callId, name: 'qwenVideoGenerate', args: { prompt: msg.prompt } });
           const res: any = await handleQwenVideoGenerate(
             { prompt: msg.prompt, resolution: msg.resolution, ratio: msg.ratio, duration: msg.duration },
-            { ai, broadcast: broadcastToClient }
+            { ai, broadcast: broadcastToClient, uid: sessionBootstrap?.uid }
           );
           if (res?.error && !res?.taskId) {
             broadcastToClient({
@@ -1443,7 +1487,7 @@ ${extraPersona ? `### USER CUSTOM PERSONA NOTES\n${extraPersona.slice(0, 2000)}`
           broadcastToClient({ type: 'toolCall', id: callId, name: 'qwenTts', args: { text: msg.text } });
           const res: any = await handleQwenTts(
             { text: msg.text, voice: msg.voice },
-            { ai, broadcast: broadcastToClient }
+            { ai, broadcast: broadcastToClient, uid: sessionBootstrap?.uid }
           );
           if (res?.error) {
             broadcastToClient({

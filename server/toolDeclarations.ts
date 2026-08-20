@@ -54,7 +54,7 @@ export function getFunctionDeclarations() {
         {
           name: 'deployAgentTask',
           description:
-            'Spawns an autonomous sub-agent (e.g., Code Reviewer, Vision Inspector, Data Analyst, Web Research Agent) to execute complex multi-step reasoning tasks.',
+            'Spawns an autonomous sub-agent (e.g., Code Reviewer, Vision Inspector, Data Analyst, Web Research Agent) to execute complex multi-step reasoning tasks. Call ONLY after the user has explicitly asked for the task and confirmed it — never spawn an agent speculatively. Only one generation/coding task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -67,7 +67,7 @@ export function getFunctionDeclarations() {
         {
           name: 'runCodingAgent',
           description:
-            'Spawns the OpenCode CLI coding agent to autonomously write, edit, debug, refactor, or build code in the project workspace. Use this when the user asks to create a new feature, fix a bug, refactor code, build a project, or perform any multi-file coding task that requires reading/writing files, running tests, or installing dependencies. The coding agent has full filesystem access to the workspace and can execute shell commands.',
+            'Spawns the OpenCode CLI coding agent to autonomously write, edit, debug, refactor, or build code in the project workspace. Use this when the user asks to create a new feature, fix a bug, refactor code, build a project, or perform any multi-file coding task that requires reading/writing files, running tests, or installing dependencies. The coding agent has full filesystem access to the workspace and can execute shell commands. Call ONLY after the user has explicitly confirmed the coding task — never start a run speculatively. Only one generation/coding task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -141,7 +141,7 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenImageGenerate',
           description:
-            'Generate images with QwenCloud (qwen-image-2.0-pro-2026-06-22 on the international endpoint, falling back to qwen-image-2.0-pro then z-image-turbo then Wan 2.7). ONLY use if the user explicitly asks to generate or create an image. This signals authorization.',
+            'Generate images with QwenCloud (qwen-image-2.0-pro-2026-06-22 on the international endpoint, falling back to qwen-image-2.0-pro then z-image-turbo then Wan 2.7). ONLY use if the user explicitly asks to generate or create an image. Call ONLY after the user has explicitly confirmed the complete final spec (subject, style, size) — never start generation speculatively or with unagreed specs. Only one generation task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -159,7 +159,7 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenImageEdit',
           description:
-            'Edit images with QwenCloud (qwen-image-2.0-pro-2026-06-22 on the international endpoint, falling back to qwen-image-2.0-pro then z-image-turbo then Wan 2.7) using text instructions and one or more source images. ONLY use if the user explicitly asks to edit an image.',
+            'Edit images with QwenCloud (qwen-image-2.0-pro-2026-06-22 on the international endpoint, falling back to qwen-image-2.0-pro then z-image-turbo then Wan 2.7) using text instructions and one or more source images. ONLY use if the user explicitly asks to edit an image. Call ONLY after the user has explicitly confirmed the edit instruction — never start generation speculatively. Only one generation task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -187,7 +187,7 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenVideoGenerate',
           description:
-            'Generate premium AI videos with QwenCloud. Models: happyhorse-1.1-t2v (international endpoint, default), falling back to wan3.0-video. ONLY use if the user explicitly asks to generate or create a video.',
+            'Generate premium AI videos with QwenCloud. Models: happyhorse-1.1-t2v (international endpoint, default), falling back to wan3.0-video. ONLY use if the user explicitly asks to generate or create a video. Call ONLY after the user has explicitly confirmed the complete final spec (description, resolution, ratio, duration) — never start generation before the user agrees. Only one generation task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -206,7 +206,7 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenTts',
           description:
-            'Synthesize speech with QwenCloud TTS (qwen-audio-3.0-tts-plus). ONLY use if the user explicitly asks for text-to-speech or narration.',
+            'Synthesize speech with QwenCloud TTS (qwen-audio-3.0-tts-plus). ONLY use if the user explicitly asks for text-to-speech or narration. Call ONLY after the user has explicitly confirmed the text and voice — never start synthesis speculatively. Only one generation task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -221,7 +221,7 @@ export function getFunctionDeclarations() {
         {
           name: 'generateVideo',
           description:
-            'Generate a short AI video clip from a text prompt using DashScope. Models: happyhorse-1.1-t2v (default) with wan3.0-video fallback. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
+            'Generate a short AI video clip from a text prompt using DashScope. Models: happyhorse-1.1-t2v (default) with wan3.0-video fallback. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage. Call ONLY after the user has explicitly confirmed the complete final spec (description, resolution/ratio, duration) — never start generation before the user agrees. Only one generation task runs at a time.',
           parameters: {
             type: Type.OBJECT,
             properties: {

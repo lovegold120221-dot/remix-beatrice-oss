@@ -9,6 +9,11 @@ const execPromise = promisify(exec);
 import WebSocket from 'ws';
 
 import { uploadMediaToFirebaseStorage } from '../src/lib/firebase';
+import {
+  tryAcquireGenerationSlot,
+  releaseGenerationSlot,
+  generationBusyMessage,
+} from './taskGate.js';
 
 const SANDBOX_PORT = process.env.SANDBOX_SERVICE_PORT || '5556';
 const CLI_PORT = process.env.CLI_SERVICE_PORT || '5557';
@@ -543,6 +548,26 @@ export async function handleDeployAgentTask(
 ) {
   const { agentName, task } = args;
   const agentId = 'agent_' + Math.random().toString(36).substring(2, 9);
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject the trigger (no model
+  // call) while a previous task is still running.
+  const slot = tryAcquireGenerationSlot(uid, 'code', agentId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
+  try {
+    return await runDeployAgentTask(args, ctx, agentId);
+  } finally {
+    releaseGenerationSlot(uid, agentId);
+  }
+}
+
+async function runDeployAgentTask(
+  args: { agentName: string; task: string },
+  ctx: ToolContext,
+  agentId: string
+) {
+  const { agentName, task } = args;
 
   const initialAgent = {
     id: agentId,
@@ -622,6 +647,13 @@ export async function handleRunCodingAgent(
 ) {
   const { task, cwd } = args;
   const sessionId = 'ca_' + Math.random().toString(36).substring(2, 9);
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject the trigger while a
+  // previous task (image/video/coding) is still running.
+  const slot = tryAcquireGenerationSlot(uid, 'code', sessionId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
 
   ctx.broadcast({
     type: 'codingAgentUpdate',
@@ -636,18 +668,42 @@ export async function handleRunCodingAgent(
     },
   });
 
+  // The agent runs in the background service; the slot stays held until the
+  // service reports a terminal state for this session (or the link dies).
+  const release = () => releaseGenerationSlot(uid, sessionId);
+  const onMessage = (data: WebSocket.RawData) => {
+    try {
+      const parsed = JSON.parse(data.toString());
+      const s = parsed?.session;
+      if (
+        parsed?.type === 'codingAgentUpdate' &&
+        s &&
+        s.id === sessionId &&
+        ['completed', 'failed', 'cancelled'].includes(s.status)
+      ) {
+        release();
+      }
+    } catch {
+      // ignore non-json
+    }
+  };
+
   try {
-    await forwardToService(
+    const ws = await forwardToService(
       'codingAgent',
       { type: 'runCodingAgent', sessionId, task, cwd },
       ctx.broadcast
     );
+    ws.on('message', onMessage);
+    ws.on('close', release);
+    ws.on('error', release);
     return {
       success: true,
       sessionId,
       message: `Coding Agent started. Watch the Coding Agent panel for live output. Task: ${task.slice(0, 120)}`,
     };
   } catch (err: any) {
+    release();
     return { success: false, error: err.message || 'Coding Agent service unavailable' };
   }
 }
@@ -840,10 +896,22 @@ export async function handleGenerateVideo(
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
   const taskId = `vid_${Date.now()}`;
-  const queued = enqueueVideoGeneration(ctx.uid || 'shared', async () => {
-    await runGenerateVideo(args, ctx, taskId);
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject a second video while any
+  // other task (image/video/audio/coding) is still in flight.
+  const slot = tryAcquireGenerationSlot(uid, 'video', taskId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
+  const queued = enqueueVideoGeneration(uid, async () => {
+    try {
+      await runGenerateVideo(args, ctx, taskId);
+    } finally {
+      releaseGenerationSlot(uid, taskId);
+    }
   });
   if (!queued.accepted) {
+    releaseGenerationSlot(uid, taskId);
     return { success: false, error: queued.reason };
   }
   if (queued.position && queued.position > 1) {
@@ -1160,6 +1228,13 @@ export async function handleQwenImageGenerate(
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
   const taskId = `qwen_img_${Date.now()}`;
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject the trigger (no model
+  // call) while a previous task is still running.
+  const slot = tryAcquireGenerationSlot(uid, 'image', taskId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
   ctx.broadcast({
     type: 'qwencloudUpdate',
     task: { id: taskId, kind: 'image', prompt: args.prompt, status: 'submitting', progress: 5, timestamp: Date.now(), ...taskMeta('image', 'submitting', args.prompt) },
@@ -1253,6 +1328,7 @@ export async function handleQwenImageGenerate(
     return { success: false, error: safeError };
   } finally {
     clearInterval(imgPingTimer);
+    releaseGenerationSlot(uid, taskId);
   }
 }
 
@@ -1272,6 +1348,13 @@ export async function handleQwenImageEdit(
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
   const taskId = `qwen_edit_${Date.now()}`;
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject the trigger while a
+  // previous task is still running.
+  const slot = tryAcquireGenerationSlot(uid, 'image', taskId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
   ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'imageEdit', prompt: args.instruction, status: 'submitting', progress: 5, timestamp: Date.now(), ...taskMeta('image', 'submitting', args.instruction) } });
   const editPingStart = Date.now();
   const editPingTimer = setInterval(() => {
@@ -1358,6 +1441,7 @@ export async function handleQwenImageEdit(
     return { success: false, error: safeError };
   } finally {
     clearInterval(editPingTimer);
+    releaseGenerationSlot(uid, taskId);
   }
 }
 
@@ -1378,10 +1462,22 @@ export async function handleQwenVideoGenerate(
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
   const taskId = `qwen_vid_${Date.now()}`;
-  const queued = enqueueVideoGeneration(ctx.uid || 'shared', async () => {
-    await runQwenVideoGenerate(args, ctx, taskId);
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject a second video while any
+  // other task (image/video/audio/coding) is still in flight.
+  const slot = tryAcquireGenerationSlot(uid, 'video', taskId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
+  const queued = enqueueVideoGeneration(uid, async () => {
+    try {
+      await runQwenVideoGenerate(args, ctx, taskId);
+    } finally {
+      releaseGenerationSlot(uid, taskId);
+    }
   });
   if (!queued.accepted) {
+    releaseGenerationSlot(uid, taskId);
     return { success: false, error: queued.reason };
   }
   if (queued.position && queued.position > 1) {
@@ -1539,6 +1635,13 @@ export async function handleQwenTts(
     return { error: 'DASHSCOPE_API_KEY is not configured' };
   }
   const taskId = `qwen_tts_${Date.now()}`;
+  const uid = ctx.uid || 'shared';
+  // One generation task at a time per user — reject the trigger while a
+  // previous task is still running.
+  const slot = tryAcquireGenerationSlot(uid, 'audio', taskId);
+  if (slot.ok === false) {
+    return { success: false, error: generationBusyMessage(slot.busy.kind) };
+  }
   ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', prompt: args.text, status: 'running', progress: 10, timestamp: Date.now(), ...taskMeta('audio', 'running') } });
   try {
     const chainResult = await tryModelChain(
@@ -1583,6 +1686,8 @@ export async function handleQwenTts(
     const safeError = safeErrorOf(err);
     ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'tts', status: 'failed', error: safeError, timestamp: Date.now(), ...taskMeta('audio', 'failed', safeError) } });
     return { success: false, error: safeError };
+  } finally {
+    releaseGenerationSlot(uid, taskId);
   }
 }
 
