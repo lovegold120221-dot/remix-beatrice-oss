@@ -144,7 +144,7 @@ flowchart TD
     S2 --> T[liveSession.sendToolResponse<br/>Gemini turns result into speech]
 ```
 
-Declarations live in `server/toolDeclarations.ts` (moved out of server.ts). Boot-time `validateToolCoverage()` and `validateSkillCoverage()` fail fast if the declarations, the catalog (`server/toolCatalog.ts`), the registry, or the skill routes drift out of sync. Media tool model strings are pinned to the Token Plan allowlists in `server/tools.ts` (image `wan2.7-image-pro`/`wan2.7-image`, video `happyhorse-1.1-t2v` only, TTS `qwen-audio-3.0-tts-plus`).
+Declarations live in `server/toolDeclarations.ts` (moved out of server.ts). Boot-time `validateToolCoverage()` and `validateSkillCoverage()` fail fast if the declarations, the catalog (`server/toolCatalog.ts`), the registry, or the skill routes drift out of sync. Media tools hit two DashScope hosts with per-model routing (`imageEndpointFor()`/`videoEndpointFor()` in `server/tools.ts`): image `qwen-image-2.0-pro` → `z-image-turbo` (intl) → `wan2.7-image-pro`/`wan2.7-image` (Token Plan); video `wan3.0-video` (intl) → `happyhorse-1.1-t2v` (Token Plan); TTS `qwen-audio-3.0-tts-plus` (Token Plan).
 
 ## 4. Memory learning flow (MemoryCore, with local fallback)
 

@@ -28,7 +28,7 @@ If the request is ambiguous, Beatrice asks for confirmation rather than guessing
 
 Required: `prompt`
 Optional defaults:
-- `model`: `"wan2.7-image-pro"` (fallback chain: `wan2.7-image-pro` then `wan2.7-image`)
+- `model`: `"qwen-image-2.0-pro"` (fallback chain: `qwen-image-2.0-pro` -> `z-image-turbo` -> `wan2.7-image-pro` -> `wan2.7-image`)
 - `size`: `"1K"` (valid: `1K`, `2K`, `4K`, or `width*height`)
 - `n`: `1` (number of images)
 - `watermark`: `false`
@@ -39,7 +39,7 @@ Example call:
 ```json
 {
   "prompt": "A cinematic portrait of a woman reading by a rainy window, soft natural light, photorealistic",
-  "model": "wan2.7-image-pro",
+  "model": "qwen-image-2.0-pro",
   "size": "1K",
   "n": 1,
   "watermark": false,
@@ -51,7 +51,7 @@ Example call:
 
 Required: `instruction`, `images` (array of URLs/paths/base64)
 Optional defaults:
-- `model`: `"wan2.7-image-pro"` (fallback chain: `wan2.7-image-pro` then `wan2.7-image`)
+- `model`: `"qwen-image-2.0-pro"` (fallback chain: `qwen-image-2.0-pro` -> `z-image-turbo` -> `wan2.7-image-pro` -> `wan2.7-image`)
 - `size`: `"1K"`
 - `n`: `1`
 - `watermark`: `false`
@@ -62,7 +62,7 @@ Example call:
 {
   "instruction": "Change the background to a sunny beach and make the colors warmer",
   "images": ["https://example.com/photo.jpg"],
-  "model": "wan2.7-image-pro",
+  "model": "qwen-image-2.0-pro",
   "size": "1K",
   "n": 1
 }
@@ -129,7 +129,7 @@ All QwenCloud media handlers now automatically fall back to the next model in th
 
 | Tool | Default chain | Override rule |
 |------|---------------|---------------|
-| `qwenImageGenerate` / `qwenImageEdit` | `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried |
+| `qwenImageGenerate` / `qwenImageEdit` | `qwen-image-2.0-pro` -> `z-image-turbo` -> `wan2.7-image-pro` -> `wan2.7-image` | If Boss specifies `model`, only that model is tried |
 | `qwenVideoGenerate` | `happyhorse-1.1-t2v` -> `wan3.0-video` -> `wan2.7-t2v` -> `wan2.6-t2v` | If Boss specifies `model`, only that model is tried |
 | `generateVideo` | `happyhorse-1.1-t2v` -> `wan3.0-video` -> `wan2.7-t2v` -> `wan2.6-t2v` | No `model` parameter exposed |
 | `qwenTts` | `qwen3-tts-flash` -> `qwen3-tts` | If Boss specifies `model`, only that model is tried |

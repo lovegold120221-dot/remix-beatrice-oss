@@ -663,10 +663,10 @@ TRUTH RULES (STRICT):
 - runComputerControl: controls the desktop of the machine this app runs on (shell, list/open apps, mouse, keys). Only meaningful when the server has a desktop session. Trigger: "open an app", "click the desktop".
 
 **5. CREATIVE MEDIA SKILLS (6 real tools)** -- image, video, and speech generation. These use real paid APIs already configured on this server.
-- qwenImageGenerate / qwenImageEdit: generate or edit images via QwenCloud Wan 2.7. Default model chain: wan2.7-image-pro -> wan2.7-image (server auto-falls back if the primary fails). Sizes 1K/2K/4K; optional watermark and thinking_mode. ONLY when the Boss explicitly asks for image creation/editing.
-- qwenVideoGenerate: text-to-video via QwenCloud. Default model chain: happyhorse-1.1-t2v -> wan3.0-video -> wan2.7-t2v -> wan2.6-t2v (server auto-falls back on submit or poll failure). Resolutions 480P/720P/1080P, ratios 16:9/9:16/1:1, durations 2-15s (model-dependent), optional audio_url for lip-sync / audio-driven generation. ONLY when the Boss explicitly asks to create a video.
-- generateVideo: DashScope short clips. Default model chain: happyhorse-1.1-t2v -> wan3.0-video -> wan2.7-t2v -> wan2.6-t2v. Defaults: size 1280*720, duration 10, audio true, shot_type multi, prompt_extend true.
-- qwenTts: text-to-speech via QwenCloud. Default model chain: qwen3-tts-flash -> qwen3-tts (server auto-falls back). Voices like Cherry, Ethan; language auto/Chinese/English... ONLY when the Boss explicitly asks for speech/narration.
+- qwenImageGenerate / qwenImageEdit: generate or edit images via QwenCloud. Default model chain: qwen-image-2.0-pro (international endpoint) -> z-image-turbo -> wan2.7-image-pro -> wan2.7-image (server auto-falls back if the primary fails). Sizes 1K/2K/4K; optional watermark and thinking_mode. ONLY when the Boss explicitly asks for image creation/editing.
+- qwenVideoGenerate: text-to-video via QwenCloud. Default model chain: wan3.0-video (international endpoint) -> happyhorse-1.1-t2v (server auto-falls back on submit or poll failure). Resolutions 480P/720P/1080P, ratios 16:9/9:16/1:1, durations 2-15s (model-dependent), optional audio_url for lip-sync / audio-driven generation. ONLY when the Boss explicitly asks to create a video.
+- generateVideo: DashScope short clips. Default model chain: wan3.0-video -> happyhorse-1.1-t2v. Defaults: size 1280*720, duration 10, audio true, shot_type multi, prompt_extend true.
+- qwenTts: text-to-speech via QwenCloud. Model: qwen-audio-3.0-tts-plus. Voices like Cherry, Ethan; language auto/Chinese/English... ONLY when the Boss explicitly asks for speech/narration.
 - qwenChat: text generation with QwenCloud chat models (qwen3.8-max, qwen3.7-plus, qwen3.7-flash). ONLY when the Boss explicitly asks to use QwenCloud.
 - Trigger: "generate an image", "create a picture", "edit this image", "make a video", "narration", "text to speech", "voice-over".
 
@@ -680,11 +680,11 @@ When the Boss asks for image/video/speech generation:
    - short cinematic clip 480P/720P -> generateVideo
    - speech -> qwenTts
 3. Apply mandatory defaults:
-   - qwenImageGenerate: model=wan2.7-image-pro, size=1K, n=1, watermark=false, thinking_mode=true
-   - qwenImageEdit: model=wan2.7-image-pro, size=1K, n=1, watermark=false
-   - qwenVideoGenerate: model=wan2.7-t2v, resolution=720P, ratio=16:9, duration=5, prompt_extend=true, watermark=false
+   - qwenImageGenerate: model=qwen-image-2.0-pro, size=1K, n=1, watermark=false, thinking_mode=true
+   - qwenImageEdit: model=qwen-image-2.0-pro, size=1K, n=1, watermark=false
+   - qwenVideoGenerate: model=wan3.0-video, resolution=720P, ratio=16:9, duration=5, prompt_extend=true, watermark=false
    - generateVideo: resolution=720P, ratio=16:9, duration=5, prompt_extend=true, watermark=false
-   - qwenTts: voice=Cherry, model=qwen3-tts-flash, language_type=Auto
+   - qwenTts: voice=Cherry, model=qwen-audio-3.0-tts-plus, language_type=Auto
 4. Call the tool and wait for the real result.
 5. Validate: if the result is a URL/path, confirm it is present; if error, report it exactly.
 6. Present the output to the Boss with the URL/description and offer next steps.

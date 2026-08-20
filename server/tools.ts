@@ -25,17 +25,44 @@ export interface ToolContext {
 }
 
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
+// Legacy Token Plan (sk-sp- keys) key, kept for video/TTS calls that still hit
+// the token-plan host. The primary DASHSCOPE_API_KEY (sk-ws-) is valid on the
+// international endpoint only.
+const DASHSCOPE_LEGACY_API_KEY = process.env.DASHSCOPE_LEGACY_API_KEY;
 // Token Plan (sk-sp- keys) endpoints. DashScope-style task APIs live under /api/v1.
 // Source: https://docs.qwencloud.com/token-plan/personal/token-plan-personal-quickstart
 const DASHSCOPE_BASE = 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/api/v1';
 const DASHSCOPE_COMPAT_BASE = 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+// International DashScope endpoint (accepts the sk-ws- key). z-image-turbo is
+// only available here, so image generation prefers this base.
+const DASHSCOPE_INTL_BASE = 'https://dashscope-intl.aliyuncs.com/api/v1';
 
 // Fallback model chains. Primary first. Used when a call fails or polling reports failure.
-// Token Plan only supports these exact model IDs (exact-string allowlist).
 // Source: https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview
-const QWEN_IMAGE_MODELS = ['wan2.7-image-pro', 'wan2.7-image'];
-const QWEN_VIDEO_MODELS = ['happyhorse-1.1-t2v'];
+// qwen-image-2.0-pro and z-image-turbo run on the international endpoint; the wan2.7-image
+// models run on Token Plan.
+const INTEL_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo'];
+const QWEN_IMAGE_MODELS = ['qwen-image-2.0-pro', 'z-image-turbo', 'wan2.7-image-pro', 'wan2.7-image'];
+// Video models rotate from most capable to fallback. wan3.0-video runs on the
+// international endpoint (async submit + task poll); the happyhorse models run on Token Plan.
+const QWEN_VIDEO_MODELS = ['wan3.0-video', 'happyhorse-1.1-t2v'];
 const QWEN_TTS_MODELS = ['qwen-audio-3.0-tts-plus'];
+
+// Key used for Token Plan host calls (video/TTS/chat/status pings). The legacy
+// sk-sp- key is valid there; the primary sk-ws- key is not.
+const TOKEN_PLAN_KEY = DASHSCOPE_LEGACY_API_KEY || DASHSCOPE_API_KEY;
+
+// Base endpoint + auth key for a given image model (intl image models are intl-only).
+function imageEndpointFor(model: string): { base: string; key: string } {
+  if (INTEL_IMAGE_MODELS.includes(model)) return { base: DASHSCOPE_INTL_BASE, key: DASHSCOPE_API_KEY };
+  return { base: DASHSCOPE_BASE, key: TOKEN_PLAN_KEY };
+}
+
+// Base endpoint + auth key for a given video model (wan3.0-video is intl-only).
+function videoEndpointFor(model: string): { base: string; key: string } {
+  if (model.startsWith('wan3.0')) return { base: DASHSCOPE_INTL_BASE, key: DASHSCOPE_API_KEY };
+  return { base: DASHSCOPE_BASE, key: TOKEN_PLAN_KEY };
+}
 
 // Generic helper: try each model in the chain until one succeeds or all fail.
 async function tryModelChain<T>(
@@ -44,21 +71,29 @@ async function tryModelChain<T>(
   predicate: (result: T) => boolean
 ): Promise<{ result: T; model: string } | { error: string; attempted: string[] }> {
   const attempted: string[] = [];
+  let lastError: string | undefined;
   for (const model of models) {
     try {
       const result = await makeCall(model);
       if (predicate(result)) return { result, model };
       attempted.push(model);
+      const err = (result as any)?.error;
+      if (err && typeof err === 'string') lastError = err;
     } catch (err: any) {
       attempted.push(model);
+      lastError = err?.message || String(err);
     }
   }
-  return { error: `All models failed: ${attempted.join(', ')}`, attempted };
+  return { error: lastError ? `All models failed: ${attempted.join(', ')} (${lastError})` : `All models failed: ${attempted.join(', ')}`, attempted };
 }
 
 function redactKey(text: string) {
-  if (!DASHSCOPE_API_KEY) return text;
-  return text.replace(new RegExp(DASHSCOPE_API_KEY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '[REDACTED]');
+  let out = text;
+  for (const key of [DASHSCOPE_API_KEY, DASHSCOPE_LEGACY_API_KEY]) {
+    if (!key) continue;
+    out = out.replace(new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '[REDACTED]');
+  }
+  return out;
 }
 
 // ---- Unified activity metadata for media-generation broadcasts ----
@@ -140,7 +175,7 @@ async function ensureStatusClips(): Promise<(string | null)[]> {
     try {
       const res = await fetch(`${DASHSCOPE_BASE}/services/aigc/multimodal-generation/generation`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${TOKEN_PLAN_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: QWEN_TTS_MODELS[0], input: { text, voice: 'Cherry', language_type: 'Auto' } }),
       });
       const data = (await res.json()) as any;
@@ -774,7 +809,7 @@ export async function handleGenerateVideo(
   }
   const taskId = `vid_${Date.now()}`;
   const queued = enqueueVideoGeneration(ctx.uid || 'shared', async () => {
-    await runGenerateVideo(args, ctx, taskId, apiKey);
+    await runGenerateVideo(args, ctx, taskId);
   });
   if (!queued.accepted) {
     return { success: false, error: queued.reason };
@@ -815,13 +850,13 @@ async function runGenerateVideo(
     watermark?: boolean;
   },
   ctx: ToolContext,
-  taskId: string,
-  apiKey: string
+  taskId: string
 ) {
-  const preferredModels = ['happyhorse-1.1-t2v'];
+  const preferredModels = QWEN_VIDEO_MODELS;
   let lastError = '';
 
   for (const model of preferredModels) {
+    const { base, key } = videoEndpointFor(model);
     const body: any = {
       model,
       input: { prompt: args.prompt },
@@ -832,6 +867,10 @@ async function runGenerateVideo(
       },
     };
     if (args.watermark !== undefined) body.parameters.watermark = args.watermark;
+    if (model.startsWith('wan3.0')) {
+      // wan3.0-video uses size/duration/audio instead of resolution/ratio.
+      body.parameters = { size: args.size && args.size.includes('1080') ? '1920*1080' : '1280*720', duration: Math.min(15, Math.max(3, args.duration || 5)), audio: args.audio ?? true };
+    }
 
     ctx.broadcast({
       type: 'videoGenerationUpdate',
@@ -847,11 +886,11 @@ async function runGenerateVideo(
     });
 
     try {
-      const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/video-generation/video-synthesis`, {
+      const submitRes = await fetch(`${base}/services/aigc/video-generation/video-synthesis`, {
         method: 'POST',
         headers: {
           'X-DashScope-Async': 'enable',
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${key}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
@@ -859,7 +898,7 @@ async function runGenerateVideo(
 
       if (!submitRes.ok) {
         const errText = await submitRes.text().catch(() => 'unknown error');
-        lastError = errText.replace(new RegExp(apiKey, 'g'), '[REDACTED]');
+        lastError = redactKey(errText);
         ctx.broadcast({
           type: 'videoGenerationUpdate',
           task: { id: taskId, model, status: 'failed', error: lastError, timestamp: Date.now(), ...taskMeta('video', 'failed', lastError) },
@@ -891,7 +930,7 @@ async function runGenerateVideo(
         },
       });
 
-      const videoUrl = await pollDashscopeVideoTask(dashTaskId, apiKey, (status, progress, url, error) => {
+      const videoUrl = await pollDashscopeVideoTask(dashTaskId, base, key, (status, progress, url, error) => {
         ctx.broadcast({
           type: 'videoGenerationUpdate',
           task: {
@@ -953,7 +992,7 @@ async function runGenerateVideo(
 
       lastError = 'Video generation did not produce a URL';
     } catch (err: any) {
-      lastError = (err.message || String(err)).replace(new RegExp(apiKey, 'g'), '[REDACTED]');
+      lastError = redactKey(err.message || String(err));
       ctx.broadcast({
         type: 'videoGenerationUpdate',
         task: { id: taskId, model, status: 'failed', error: lastError, timestamp: Date.now(), ...taskMeta('video', 'failed', lastError) },
@@ -970,6 +1009,7 @@ async function runGenerateVideo(
 
 async function pollDashscopeVideoTask(
   dashTaskId: string,
+  base: string,
   apiKey: string,
   onUpdate: (status: string, progress: number, videoUrl?: string, error?: string) => void,
   ctx?: ToolContext
@@ -981,7 +1021,7 @@ async function pollDashscopeVideoTask(
     await new Promise((r) => setTimeout(r, pollIntervalMs));
     await statusPingBroadcast(ctx, (attempt + 1) * pollIntervalMs);
 
-    const res = await fetch(`${DASHSCOPE_BASE}/tasks/${dashTaskId}`, {
+    const res = await fetch(`${base}/tasks/${dashTaskId}`, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },
@@ -1042,7 +1082,7 @@ export async function handleQwenChat(
     const res = await fetch(`${DASHSCOPE_COMPAT_BASE}/chat/completions`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+        Authorization: `Bearer ${TOKEN_PLAN_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -1056,6 +1096,11 @@ export async function handleQwenChat(
       }),
     });
     const data = (await res.json()) as any;
+    if (!res.ok) {
+      const msg = redactKey(data?.error?.message || data?.message || `DashScope error ${res.status}`);
+      ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'chat', status: 'failed', error: msg, timestamp: Date.now(), ...taskMeta('chat', 'failed', msg) } });
+      return { success: false, error: msg };
+    }
     const text = data.choices?.[0]?.message?.content || '';
     const done = { id: taskId, kind: 'chat', prompt: args.prompt, status: 'completed', progress: 100, result: text, timestamp: Date.now(), ...taskMeta('chat', 'completed') };
     ctx.broadcast({ type: 'qwencloudUpdate', task: done });
@@ -1095,17 +1140,18 @@ export async function handleQwenImageGenerate(
     const chainResult = await tryModelChain(
       args.model ? [args.model] : QWEN_IMAGE_MODELS,
       async (model) => {
+        const { base, key } = imageEndpointFor(model);
         const body: any = {
           model,
           input: { messages: [{ role: 'user', content: [{ text: args.prompt }] }] },
-          parameters: { size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false },
+          parameters: { prompt_extend: false, size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false },
         };
 
-        // Token Plan image generation is synchronous via multimodal-generation/generation.
-        // Source: https://docs.qwencloud.com/token-plan/best-practices/integrate-multimodal-gen
-        const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/multimodal-generation/generation`, {
+        // z-image-turbo is synchronous on the international endpoint; Token Plan
+        // image generation is also synchronous via multimodal-generation/generation.
+        const submitRes = await fetch(`${base}/services/aigc/multimodal-generation/generation`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
 
@@ -1203,18 +1249,20 @@ export async function handleQwenImageEdit(
     const chainResult = await tryModelChain(
       args.model ? [args.model] : QWEN_IMAGE_MODELS,
       async (model) => {
+        const { base, key } = imageEndpointFor(model);
         const content: any[] = [{ text: args.instruction }];
         for (const img of args.images || []) content.push({ image: img });
         const body: any = {
           model,
           input: { messages: [{ role: 'user', content }] },
-          parameters: { size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false },
+          parameters: { prompt_extend: false, size: args.size || '1024*1024', n: args.n || 1, watermark: args.watermark ?? false },
         };
 
-        // Token Plan image generation is synchronous via multimodal-generation/generation.
-        const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/multimodal-generation/generation`, {
+        // z-image-turbo is synchronous on the international endpoint; Token Plan
+        // image editing is also synchronous via multimodal-generation/generation.
+        const submitRes = await fetch(`${base}/services/aigc/multimodal-generation/generation`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
 
@@ -1348,6 +1396,7 @@ async function runQwenVideoGenerate(
     const chainResult = await tryModelChain(
       args.model ? [args.model] : QWEN_VIDEO_MODELS,
       async (model) => {
+        const { base, key } = videoEndpointFor(model);
         const input: any = { prompt: args.prompt };
         if (args.audio_url) input.audio_url = args.audio_url;
         const body: any = {
@@ -1377,9 +1426,9 @@ async function runQwenVideoGenerate(
           body.parameters.audio = true;
         }
 
-        const submitRes = await fetch(`${DASHSCOPE_BASE}/services/aigc/video-generation/video-synthesis`, {
+        const submitRes = await fetch(`${base}/services/aigc/video-generation/video-synthesis`, {
           method: 'POST',
-          headers: { 'X-DashScope-Async': 'enable', Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          headers: { 'X-DashScope-Async': 'enable', Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
 
@@ -1391,7 +1440,7 @@ async function runQwenVideoGenerate(
         if (!dashTaskId) return { success: false, error: 'No task_id returned', rawModel: model };
 
         ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', dashTaskId, requestId, model, prompt: args.prompt, status: 'queued', progress: 10, timestamp: Date.now(), ...taskMeta('video', 'queued') } });
-        const result = await pollDashscopeTask(dashTaskId, 'video', (status, progress, urls, error) => {
+        const result = await pollDashscopeTask(dashTaskId, 'video', base, key, (status, progress, urls, error) => {
           ctx.broadcast({ type: 'qwencloudUpdate', task: { id: taskId, kind: 'video', dashTaskId, requestId, model, prompt: args.prompt, status, progress, urls, error, timestamp: Date.now(), ...taskMeta('video', status, error) } });
         }, ctx);
 
@@ -1463,7 +1512,7 @@ export async function handleQwenTts(
       async (model) => {
         const res = await fetch(`${DASHSCOPE_BASE}/services/aigc/multimodal-generation/generation`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${TOKEN_PLAN_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model,
             input: { text: args.text, voice: args.voice || 'Cherry', language_type: args.language_type || 'Auto' },
@@ -1505,6 +1554,8 @@ export async function handleQwenTts(
 async function pollDashscopeTask(
   dashTaskId: string,
   kind: 'image' | 'video',
+  base: string,
+  apiKey: string,
   onUpdate: (status: string, progress: number, urls?: string[], error?: string) => void,
   ctx?: ToolContext
 ): Promise<{ urls?: string[] }> {
@@ -1513,8 +1564,8 @@ async function pollDashscopeTask(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
     await statusPingBroadcast(ctx, (attempt + 1) * pollIntervalMs);
-    const res = await fetch(`${DASHSCOPE_BASE}/tasks/${dashTaskId}`, {
-      headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY || ''}` },
+    const res = await fetch(`${base}/tasks/${dashTaskId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (!res.ok) continue;
     const data = (await res.json()) as any;

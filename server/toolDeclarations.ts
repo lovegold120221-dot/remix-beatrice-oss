@@ -141,12 +141,12 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenImageGenerate',
           description:
-            'Generate images with QwenCloud Wan 2.7 image models. ONLY use if the user explicitly asks to generate or create an image. This signals authorization.',
+            'Generate images with QwenCloud (qwen-image-2.0-pro on the international endpoint, falling back to z-image-turbo then Wan 2.7). ONLY use if the user explicitly asks to generate or create an image. This signals authorization.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               prompt: { type: Type.STRING, description: 'Image description' },
-              model: { type: Type.STRING, description: 'wan2.7-image-pro or wan2.7-image' },
+              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / wan2.7-image-pro / wan2.7-image' },
               size: { type: Type.STRING, description: '1K, 2K, 4K, or width*height' },
               n: { type: Type.NUMBER, description: 'Number of images' },
               watermark: { type: Type.BOOLEAN, description: 'Add AI Generated watermark' },
@@ -159,13 +159,13 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenImageEdit',
           description:
-            'Edit images with QwenCloud Wan 2.7 image models using text instructions and one or more source images. ONLY use if the user explicitly asks to edit an image.',
+            'Edit images with QwenCloud (qwen-image-2.0-pro on the international endpoint, falling back to z-image-turbo then Wan 2.7) using text instructions and one or more source images. ONLY use if the user explicitly asks to edit an image.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               instruction: { type: Type.STRING, description: 'What to do with the images' },
               images: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Public image URLs, base64, or file paths' },
-              model: { type: Type.STRING, description: 'wan2.7-image-pro or wan2.7-image' },
+              model: { type: Type.STRING, description: 'qwen-image-2.0-pro (default) or z-image-turbo / wan2.7-image-pro / wan2.7-image' },
               size: { type: Type.STRING, description: '1K, 2K, or width*height' },
               n: { type: Type.NUMBER, description: 'Number of outputs' },
               watermark: { type: Type.BOOLEAN, description: 'Add watermark' },
@@ -187,12 +187,12 @@ export function getFunctionDeclarations() {
         {
           name: 'qwenVideoGenerate',
           description:
-            'Generate premium AI videos with QwenCloud. Model: happyhorse-1.1-t2v (1080P, 3-15s, audio) — the only video model available on the Token Plan endpoint. ONLY use if the user explicitly asks to generate or create a video.',
+            'Generate premium AI videos with QwenCloud. Models: wan3.0-video (international endpoint, preferred), falling back to happyhorse-1.1-t2v. ONLY use if the user explicitly asks to generate or create a video.',
           parameters: {
             type: Type.OBJECT,
             properties: {
               prompt: { type: Type.STRING, description: 'Video description with optional shot timestamps' },
-              model: { type: Type.STRING, description: 'Optional: happyhorse-1.1-t2v (default)' },
+              model: { type: Type.STRING, description: 'Optional: wan3.0-video (default) or happyhorse-1.1-t2v' },
               resolution: { type: Type.STRING, description: '480P, 720P or 1080P' },
               ratio: { type: Type.STRING, description: '16:9, 9:16, or 1:1' },
               duration: { type: Type.NUMBER, description: 'Duration in seconds (model-dependent, typically 2-15s)' },
@@ -221,7 +221,7 @@ export function getFunctionDeclarations() {
         {
           name: 'generateVideo',
           description:
-            'Generate a short AI video clip from a text prompt using DashScope. Model: happyhorse-1.1-t2v (the only video model available on the Token Plan endpoint). Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
+            'Generate a short AI video clip from a text prompt using DashScope. Models: wan3.0-video (preferred) with happyhorse-1.1-t2v fallback. Use when the user asks to create a video, generate a clip, animate a scene, or produce cinematic footage.',
           parameters: {
             type: Type.OBJECT,
             properties: {
